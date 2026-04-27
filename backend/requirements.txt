@@ -17,6 +17,7 @@ PyYAML==6.0.2
 fastapi==0.118.0
 uvicorn[standard]==0.37.0
 python-multipart==0.0.20
+ldap3==2.9.1
 
 # Phase 8 — PDF export with burned-in redactions, Bates numbering
 reportlab==4.2.5

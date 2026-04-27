@@ -111,6 +111,84 @@ export interface ExportManifest {
 
 export type AiFlagStatus = "open" | "dismissed" | "promoted";
 
+export interface CurrentUser {
+  user_id: number;
+  username: string;
+  display_name: string | null;
+  email: string | null;
+  expires_at: string;
+}
+
+export type CaseStatus =
+  | "processing"
+  | "ready"
+  | "failed"
+  | "exported"
+  | "archived";
+
+export interface Case {
+  id: number;
+  name: string;
+  bates_prefix: string;
+  status: CaseStatus;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+  error_message: string | null;
+  failed_stage: string | null;
+}
+
+export interface CaseStats {
+  emails: number;
+  attachments: number;
+  pii_detections: number;
+  redactions: number;
+  redactions_accepted: number;
+}
+
+export interface PipelineJob {
+  id: number;
+  case_id: number;
+  started_by: number | null;
+  upload_path: string | null;
+  label: string | null;
+  propose_redactions: number;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  current_stage: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error_message: string | null;
+  failed_stage: string | null;
+  created_at: string;
+}
+
+export interface CaseDetail {
+  case: Case;
+  stats: CaseStats;
+  latest_job: PipelineJob | null;
+}
+
+export interface ImportSubmitted {
+  job_id: number;
+  case_id: number;
+  case_name: string;
+  bates_prefix: string;
+  filename: string;
+  saved_path: string;
+  label: string | null;
+  status: string;
+  submitted_at: string;
+}
+
+export interface PipelineEvent {
+  id: number;
+  stage: string;
+  kind: "started" | "progress" | "finished" | "failed";
+  message: string | null;
+  payload: Record<string, unknown> | null;
+  event_at: string;
+}
+
 export interface ImportSummary {
   import_id: string;
   filename: string;

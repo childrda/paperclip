@@ -1,0 +1,56 @@
+# Multi-user Paperclip deployment.
+#
+# Single-host setup: backend container + a static-served frontend
+# bundle behind nginx on the same host. Officers double-click the
+# launcher script (paperclip.bat / .command / .desktop) which runs
+# `docker compose up -d` and opens the browser.
+
+services:
+  backend:
+    build:
+      context: backend
+      dockerfile: Dockerfile
+    image: paperclip-backend:latest
+    restart: unless-stopped
+    environment:
+      FOIA_DB_PATH: /data/foia.db
+      FOIA_ATTACHMENT_DIR: /data/attachments
+      FOIA_EXPORT_DIR: /data/exports
+      FOIA_INBOX_DIR: /data/inbox
+      FOIA_CONFIG_FILE: /config/district.yaml
+      FOIA_CORS_ORIGINS: ${PAPERCLIP_PUBLIC_ORIGIN:-http://localhost:8080}
+      FOIA_LOG_LEVEL: INFO
+      # Authentication: real LDAPS in production. Override these via
+      # an .env file alongside this docker-compose.yml so secrets
+      # don't end up in the image.
+      PAPERCLIP_LDAP_URI: ${PAPERCLIP_LDAP_URI:-}
+      PAPERCLIP_LDAP_BIND_DN: ${PAPERCLIP_LDAP_BIND_DN:-}
+      PAPERCLIP_LDAP_BIND_PASSWORD: ${PAPERCLIP_LDAP_BIND_PASSWORD:-}
+      PAPERCLIP_LDAP_USER_BASE_DN: ${PAPERCLIP_LDAP_USER_BASE_DN:-}
+      PAPERCLIP_LDAP_USER_FILTER: ${PAPERCLIP_LDAP_USER_FILTER:-(sAMAccountName={username})}
+      PAPERCLIP_LDAP_GROUP_DN: ${PAPERCLIP_LDAP_GROUP_DN:-}
+      PAPERCLIP_LDAP_CA_CERT_PATH: ${PAPERCLIP_LDAP_CA_CERT_PATH:-}
+      PAPERCLIP_LDAP_TIMEOUT_SECONDS: ${PAPERCLIP_LDAP_TIMEOUT_SECONDS:-10}
+      PAPERCLIP_AUTH_LOCKOUT_THRESHOLD: ${PAPERCLIP_AUTH_LOCKOUT_THRESHOLD:-5}
+      PAPERCLIP_AUTH_LOCKOUT_WINDOW_MINUTES: ${PAPERCLIP_AUTH_LOCKOUT_WINDOW_MINUTES:-15}
+      PAPERCLIP_AUTH_SESSION_LIFETIME_HOURS: ${PAPERCLIP_AUTH_SESSION_LIFETIME_HOURS:-8}
+      PAPERCLIP_AUTH_GROUP_RECHECK_MINUTES: ${PAPERCLIP_AUTH_GROUP_RECHECK_MINUTES:-15}
+      # Dev mode: only set these on a developer laptop. Never in prod.
+      PAPERCLIP_AUTH_DEV_MODE: ${PAPERCLIP_AUTH_DEV_MODE:-false}
+      PAPERCLIP_AUTH_DEV_USERS: ${PAPERCLIP_AUTH_DEV_USERS:-}
+    volumes:
+      - ./data:/data
+      - ./backend/config:/config:ro
+    expose:
+      - "8000"
+
+  frontend:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "${PAPERCLIP_PORT:-8080}:80"
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html:ro
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend

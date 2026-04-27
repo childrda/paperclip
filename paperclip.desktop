@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Paperclip
+Comment=FOIA Redaction Review
+Exec=bash -c 'cd %k/.. && ./paperclip.sh'
+Icon=document-edit
+Terminal=false
+Categories=Office;

@@ -24,7 +24,7 @@ from ...ai_driver import (
     run_ai_qa,
 )
 from ...district import DistrictConfig, load_district_config
-from ..deps import Pagination, get_actor, get_db, pagination
+from ..deps import CallerIdentity, Pagination, get_caller, get_db, pagination
 from ..schemas import (
     AiDismissRequest,
     AiFlagOut,
@@ -107,7 +107,7 @@ def run_ai_qa_endpoint(
     payload: AiQaRunRequest,
     request: Request,
     conn: sqlite3.Connection = Depends(get_db),
-    actor: str = Depends(get_actor),
+    caller: CallerIdentity = Depends(get_caller),
 ):
     district = _district(request)
     try:
@@ -127,7 +127,8 @@ def run_ai_qa_endpoint(
     audit.log_event(
         conn,
         event_type="ai_qa.run",
-        actor=actor,
+        actor=caller.actor,
+        user_id=caller.user_id,
         origin="api",
         payload={
             "provider": provider.name,
@@ -149,17 +150,20 @@ def dismiss_ai_flag(
     flag_id: int,
     payload: AiDismissRequest,
     conn: sqlite3.Connection = Depends(get_db),
-    actor: str = Depends(get_actor),
+    caller: CallerIdentity = Depends(get_caller),
 ):
     try:
-        row = dismiss_flag(conn, flag_id, actor=actor, note=payload.note)
+        row = dismiss_flag(
+            conn, flag_id, actor=caller.actor, note=payload.note,
+        )
     except AiFlagError as e:
         msg = str(e).lower()
         raise HTTPException(404 if "not found" in msg else 400, str(e))
     audit.log_event(
         conn,
         event_type="ai_qa.dismiss",
-        actor=actor,
+        actor=caller.actor,
+        user_id=caller.user_id,
         origin="api",
         source_type="ai_flag",
         source_id=int(flag_id),
@@ -178,13 +182,13 @@ def promote_ai_flag(
     payload: AiPromoteRequest,
     request: Request,
     conn: sqlite3.Connection = Depends(get_db),
-    actor: str = Depends(get_actor),
+    caller: CallerIdentity = Depends(get_caller),
 ):
     district = _district(request)
     try:
         result = promote_flag(
             conn, district, flag_id,
-            actor=actor,
+            actor=caller.actor,
             exemption_code=payload.exemption_code,
             note=payload.note,
         )
@@ -194,7 +198,8 @@ def promote_ai_flag(
     audit.log_event(
         conn,
         event_type="ai_qa.promote",
-        actor=actor,
+        actor=caller.actor,
+        user_id=caller.user_id,
         origin="api",
         source_type="ai_flag",
         source_id=int(flag_id),

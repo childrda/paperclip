@@ -20,8 +20,11 @@ CREATE TABLE IF NOT EXISTS emails (
     body_html_sanitized TEXT,
     headers_json        TEXT,     -- full headers as JSON object (key -> list[str])
     ingested_at         TEXT NOT NULL,
+    case_id             INTEGER,  -- FK added by db.py migration; NULL = legacy
     UNIQUE (mbox_source, mbox_index)
 );
+
+CREATE INDEX IF NOT EXISTS idx_emails_case ON emails(case_id);
 
 CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id);
 CREATE INDEX IF NOT EXISTS idx_emails_from       ON emails(from_addr);
@@ -145,6 +148,32 @@ CREATE TABLE IF NOT EXISTS person_occurrences (
 CREATE INDEX IF NOT EXISTS idx_person_occ_person ON person_occurrences(person_id);
 CREATE INDEX IF NOT EXISTS idx_person_occ_source ON person_occurrences(source_type, source_id);
 
+-- Phase 4 (temporal classifier): every observation a person makes in
+-- the corpus is logged with the date it was *observed*, so downstream
+-- code can ask "what did we know about this person on date X?" rather
+-- than "what do we know now?". Required for legal defensibility — a
+-- redaction decision dated March 2022 must be defensible from what
+-- the corpus knew in March 2022, not from later signal.
+--
+-- Common affiliation_type values:
+--   'email_domain'     value = the domain the person was using
+--   'is_internal'      value = 'true' | 'false' under district rules at the time
+--   'signature_email'  value = an alternate email seen in that email's signature
+CREATE TABLE IF NOT EXISTS person_affiliations (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id         INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    affiliation_type  TEXT    NOT NULL,
+    affiliation_value TEXT    NOT NULL,
+    observed_at       TEXT    NOT NULL,
+    source_email_id   INTEGER REFERENCES emails(id) ON DELETE SET NULL,
+    created_at        TEXT    NOT NULL,
+    UNIQUE (person_id, affiliation_type, affiliation_value, source_email_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_aff_person_time
+    ON person_affiliations(person_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_aff_type ON person_affiliations(affiliation_type);
+
 -- Phase 5: FTS5 virtual tables for full-text search over email bodies and
 -- extracted attachment text. Content is owned (default) so snippets / highlights
 -- work without an external content reference. Triggers mirror inserts from the
@@ -245,6 +274,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     event_at        TEXT    NOT NULL,
     event_type      TEXT    NOT NULL,
     actor           TEXT    NOT NULL,
+    user_id         INTEGER,            -- added by db.py migration; NULL = legacy CLI/API actor only
     source_type     TEXT,
     source_id       INTEGER,
     payload_json    TEXT,
@@ -254,6 +284,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_event_at   ON audit_log(event_at);
 CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_log(event_type);
 CREATE INDEX IF NOT EXISTS idx_audit_actor      ON audit_log(actor);
+CREATE INDEX IF NOT EXISTS idx_audit_user       ON audit_log(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_source     ON audit_log(source_type, source_id);
 
 CREATE TRIGGER IF NOT EXISTS audit_log_no_update
@@ -269,6 +300,114 @@ CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
 BEGIN
     SELECT RAISE(ABORT, 'audit_log is append-only');
 END;
+
+-- Authentication: users mirror the directory after a successful LDAPS
+-- login. We never store passwords here. ``directory_dn`` is the bind DN
+-- so a stable foreign key survives renames.
+CREATE TABLE IF NOT EXISTS users (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    username        TEXT    NOT NULL UNIQUE,
+    directory_dn    TEXT    UNIQUE,
+    display_name    TEXT,
+    email           TEXT,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    last_login_at   TEXT,
+    last_seen_at    TEXT,
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+
+-- Issued opaque session tokens. Tokens are stored hashed (SHA-256) so a
+-- DB read alone can't impersonate. ``expires_at`` is a hard timeout;
+-- ``last_refresh_at`` is bumped on every authenticated request so we
+-- can refuse stale sessions.
+CREATE TABLE IF NOT EXISTS user_sessions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash        TEXT    NOT NULL UNIQUE,
+    issued_at         TEXT    NOT NULL,
+    expires_at        TEXT    NOT NULL,
+    last_refresh_at   TEXT    NOT NULL,
+    last_group_check_at TEXT,
+    revoked_at        TEXT,
+    source_ip         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_token ON user_sessions(token_hash);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id);
+
+-- Failed login attempts for lockout policy. Append-only.
+CREATE TABLE IF NOT EXISTS auth_failed_logins (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT    NOT NULL,
+    source_ip     TEXT,
+    reason        TEXT,
+    attempted_at  TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_failed_user_time
+    ON auth_failed_logins(username, attempted_at);
+
+-- Cases: top-level grouping for one FOIA production. Created when a
+-- reviewer uploads a mailbox; carries the per-case Bates prefix and
+-- review status.
+CREATE TABLE IF NOT EXISTS cases (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL,
+    bates_prefix    TEXT    NOT NULL,
+    status          TEXT    NOT NULL DEFAULT 'processing',
+    created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL,
+    error_message   TEXT,
+    failed_stage    TEXT,
+    CHECK (status IN ('processing', 'ready', 'failed', 'exported', 'archived'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
+CREATE INDEX IF NOT EXISTS idx_cases_created_at ON cases(created_at);
+
+-- Background pipeline jobs. One row per ``imports`` upload; the SSE
+-- endpoint streams a row's stage events as they're published.
+CREATE TABLE IF NOT EXISTS pipeline_jobs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id         INTEGER REFERENCES cases(id) ON DELETE CASCADE,
+    started_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    upload_path     TEXT,
+    label           TEXT,
+    propose_redactions INTEGER NOT NULL DEFAULT 1,
+    status          TEXT    NOT NULL DEFAULT 'queued',
+    current_stage   TEXT,
+    started_at      TEXT,
+    finished_at     TEXT,
+    error_message   TEXT,
+    failed_stage    TEXT,
+    created_at      TEXT    NOT NULL,
+    CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_case ON pipeline_jobs(case_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON pipeline_jobs(status);
+
+-- Per-stage progress events streamed to clients. Append-only.
+CREATE TABLE IF NOT EXISTS pipeline_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id      INTEGER NOT NULL REFERENCES pipeline_jobs(id) ON DELETE CASCADE,
+    stage       TEXT    NOT NULL,
+    kind        TEXT    NOT NULL,    -- 'started' | 'progress' | 'finished' | 'failed'
+    message     TEXT,
+    payload_json TEXT,
+    event_at    TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_job_id ON pipeline_events(job_id, id);
+
+-- Scope emails to cases. Existing rows pre-Phase-X have NULL until the
+-- migration in db.py assigns them to a default "Legacy" case.
+-- (SQLite ALTER TABLE can't add a column conditionally; we handle the
+-- legacy-row migration in code.)
 
 -- Phase 10: AI QA flags. Output of an LLM-assisted scan. These are
 -- *advisory* only — AI must never auto-redact. A flag transitions to

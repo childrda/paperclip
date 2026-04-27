@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ... import audit
 from ...district import DistrictConfig, load_district_config
 from ...export import ExportConfig, run_export
-from ..deps import get_actor, get_db
+from ..deps import CallerIdentity, get_caller, get_db
 
 router = APIRouter(prefix="/exports", tags=["exports"])
 
@@ -80,7 +80,7 @@ def create_export(
     payload: ExportRequest,
     request: Request,
     conn: sqlite3.Connection = Depends(get_db),
-    actor: str = Depends(get_actor),
+    caller: CallerIdentity = Depends(get_caller),
 ) -> ExportManifest:
     root = _export_root(request)
     export_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8]
@@ -97,7 +97,8 @@ def create_export(
     audit.log_event(
         conn,
         event_type=audit.EVT_EXPORT_RUN,
-        actor=actor,
+        actor=caller.actor,
+        user_id=caller.user_id,
         origin="api",
         source_type="export",
         payload={

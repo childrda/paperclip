@@ -54,6 +54,21 @@ class Config:
     export_dir: Path | None = None
     # Post-Phase-10: UI-driven imports
     inbox_dir: Path | None = None
+    # Authentication (LDAPS)
+    ldap_uri: str | None = None
+    ldap_bind_dn: str | None = None
+    ldap_bind_password: str | None = None
+    ldap_user_base_dn: str | None = None
+    ldap_user_filter: str = "(sAMAccountName={username})"
+    ldap_group_dn: str | None = None
+    ldap_ca_cert_path: str | None = None
+    ldap_timeout_seconds: int = 10
+    auth_lockout_threshold: int = 5
+    auth_lockout_window_minutes: int = 15
+    auth_session_lifetime_hours: int = 8
+    auth_group_recheck_minutes: int = 15
+    auth_dev_mode: bool = False
+    auth_dev_users: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -86,6 +101,44 @@ class Config:
             inbox_dir=Path(
                 os.environ.get("FOIA_INBOX_DIR", "./data/inbox")
             ).resolve(),
+            ldap_uri=os.environ.get("PAPERCLIP_LDAP_URI") or None,
+            ldap_bind_dn=os.environ.get("PAPERCLIP_LDAP_BIND_DN") or None,
+            ldap_bind_password=(
+                os.environ.get("PAPERCLIP_LDAP_BIND_PASSWORD") or None
+            ),
+            ldap_user_base_dn=(
+                os.environ.get("PAPERCLIP_LDAP_USER_BASE_DN") or None
+            ),
+            ldap_user_filter=os.environ.get(
+                "PAPERCLIP_LDAP_USER_FILTER", "(sAMAccountName={username})"
+            ),
+            ldap_group_dn=os.environ.get("PAPERCLIP_LDAP_GROUP_DN") or None,
+            ldap_ca_cert_path=(
+                os.environ.get("PAPERCLIP_LDAP_CA_CERT_PATH") or None
+            ),
+            ldap_timeout_seconds=_env_int(
+                "PAPERCLIP_LDAP_TIMEOUT_SECONDS", 10
+            ),
+            auth_lockout_threshold=_env_int(
+                "PAPERCLIP_AUTH_LOCKOUT_THRESHOLD", 5
+            ),
+            auth_lockout_window_minutes=_env_int(
+                "PAPERCLIP_AUTH_LOCKOUT_WINDOW_MINUTES", 15
+            ),
+            auth_session_lifetime_hours=_env_int(
+                "PAPERCLIP_AUTH_SESSION_LIFETIME_HOURS", 8
+            ),
+            auth_group_recheck_minutes=_env_int(
+                "PAPERCLIP_AUTH_GROUP_RECHECK_MINUTES", 15
+            ),
+            auth_dev_mode=_env_bool("PAPERCLIP_AUTH_DEV_MODE", False),
+            auth_dev_users=tuple(
+                u.strip()
+                for u in os.environ.get(
+                    "PAPERCLIP_AUTH_DEV_USERS", ""
+                ).split(",")
+                if u.strip()
+            ),
         )
 
 

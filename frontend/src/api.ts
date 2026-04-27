@@ -5,15 +5,19 @@ import type {
   AiFlag,
   AiFlagStatus,
   AuditEvent,
+  Case,
+  CaseDetail,
+  CaseStatus,
+  CurrentUser,
   EmailDetail,
   EmailSummary,
   ExemptionCode,
   ExportListItem,
   ExportManifest,
-  ImportListItem,
-  ImportSummary,
+  ImportSubmitted,
   Page,
   PersonSummary,
+  PipelineJob,
   Redaction,
   RedactionStatus,
   SearchHit,
@@ -27,10 +31,10 @@ class ApiError extends Error {
 }
 
 function reviewerHeader(): Record<string, string> {
-  // Pull the reviewer name set in the Phase 7 header input. Sent on every
-  // request so the backend audit log can attribute reads as well as writes.
-  const v = (localStorage.getItem("foia.reviewer") ?? "").trim();
-  return v ? { "X-FOIA-Reviewer": v } : {};
+  // Auth identity flows through the HttpOnly session cookie now; this
+  // helper survives only as a hook for legacy callers that don't have
+  // a session and want to attribute via X-FOIA-Reviewer (e.g. tests).
+  return {};
 }
 
 async function request<T>(
@@ -39,9 +43,9 @@ async function request<T>(
 ): Promise<T> {
   const res = await fetch(path, {
     ...init,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      ...reviewerHeader(),
       ...(init.headers ?? {}),
     },
   });
@@ -153,16 +157,62 @@ export const api = {
     });
   },
 
-  async uploadImport(args: {
+  // ---- Auth
+
+  async login(username: string, password: string): Promise<CurrentUser> {
+    return request("/api/v1/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+  },
+
+  async logout(): Promise<void> {
+    await request("/api/v1/auth/logout", { method: "POST" });
+  },
+
+  async getMe(): Promise<CurrentUser | null> {
+    try {
+      return await request<CurrentUser>("/api/v1/auth/me");
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) return null;
+      throw e;
+    }
+  },
+
+  // ---- Cases
+
+  async listCases(args: {
+    status?: CaseStatus;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<{ items: Case[]; total: number; limit: number; offset: number }> {
+    return request(`/api/v1/cases${qs(args as Record<string, unknown>)}`);
+  },
+
+  async getCase(id: number): Promise<CaseDetail> {
+    return request(`/api/v1/cases/${id}`);
+  },
+
+  async setCaseStatus(id: number, status: CaseStatus): Promise<Case> {
+    return request(`/api/v1/cases/${id}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    });
+  },
+
+  // ---- Imports (background job, SSE-streamed)
+
+  async submitImport(args: {
     file: File;
+    name: string;
+    bates_prefix?: string;
     label?: string;
     propose_redactions?: boolean;
-    onProgress?: (pct: number | null) => void;
-  }): Promise<ImportSummary> {
-    // multipart upload — needs raw fetch (the JSON wrapper sets the wrong
-    // Content-Type). We still send X-FOIA-Reviewer.
+  }): Promise<ImportSubmitted> {
     const fd = new FormData();
     fd.append("file", args.file);
+    fd.append("name", args.name);
+    if (args.bates_prefix) fd.append("bates_prefix", args.bates_prefix);
     if (args.label) fd.append("label", args.label);
     fd.append(
       "propose_redactions",
@@ -172,16 +222,33 @@ export const api = {
       method: "POST",
       body: fd,
       headers: reviewerHeader(),
+      credentials: "include",
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new ApiError(res.status, text);
     }
-    return (await res.json()) as ImportSummary;
+    return (await res.json()) as ImportSubmitted;
   },
 
-  async listImports(): Promise<ImportListItem[]> {
+  async getImport(jobId: number): Promise<{ job: PipelineJob; events: unknown[] }> {
+    return request(`/api/v1/imports/${jobId}`);
+  },
+
+  async listImports(): Promise<PipelineJob[]> {
     return request("/api/v1/imports");
+  },
+
+  async retryImport(jobId: number): Promise<{ job_id: number; status: string }> {
+    return request(`/api/v1/imports/${jobId}/retry`, { method: "POST" });
+  },
+
+  /** Returns an EventSource subscribed to the job's progress stream. */
+  importEventSource(jobId: number): EventSource {
+    // Vite proxies /api → backend; SSE works through the proxy.
+    return new EventSource(`/api/v1/imports/${jobId}/events`, {
+      withCredentials: true,
+    });
   },
 
   async search(q: string, scope?: "emails" | "attachments"): Promise<Page<SearchHit>> {

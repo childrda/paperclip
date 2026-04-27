@@ -23,7 +23,7 @@ from ...redaction import (
     list_redactions,
     update_redaction,
 )
-from ..deps import Pagination, get_actor, get_db, pagination
+from ..deps import CallerIdentity, Pagination, get_caller, get_db, pagination
 from ..schemas import (
     ExemptionCodeOut,
     Page,
@@ -120,7 +120,7 @@ def create_redaction_endpoint(
     payload: RedactionCreate,
     request: Request,
     conn: sqlite3.Connection = Depends(get_db),
-    actor: str = Depends(get_actor),
+    caller: CallerIdentity = Depends(get_caller),
 ):
     try:
         row = create_redaction(
@@ -141,7 +141,8 @@ def create_redaction_endpoint(
     audit.log_event(
         conn,
         event_type=audit.EVT_REDACTION_CREATE,
-        actor=actor,
+        actor=caller.actor,
+        user_id=caller.user_id,
         origin="api",
         source_type="redaction",
         source_id=int(row["id"]),
@@ -167,7 +168,7 @@ def patch_redaction_endpoint(
     payload: RedactionPatch,
     request: Request,
     conn: sqlite3.Connection = Depends(get_db),
-    actor: str = Depends(get_actor),
+    caller: CallerIdentity = Depends(get_caller),
 ):
     try:
         row = update_redaction(
@@ -187,7 +188,8 @@ def patch_redaction_endpoint(
     audit.log_event(
         conn,
         event_type=audit.EVT_REDACTION_UPDATE,
-        actor=actor,
+        actor=caller.actor,
+        user_id=caller.user_id,
         origin="api",
         source_type="redaction",
         source_id=int(redaction_id),
@@ -209,7 +211,7 @@ def patch_redaction_endpoint(
 def delete_redaction_endpoint(
     redaction_id: int,
     conn: sqlite3.Connection = Depends(get_db),
-    actor: str = Depends(get_actor),
+    caller: CallerIdentity = Depends(get_caller),
 ):
     try:
         delete_redaction(conn, redaction_id)
@@ -218,7 +220,8 @@ def delete_redaction_endpoint(
     audit.log_event(
         conn,
         event_type=audit.EVT_REDACTION_DELETE,
-        actor=actor,
+        actor=caller.actor,
+        user_id=caller.user_id,
         origin="api",
         source_type="redaction",
         source_id=int(redaction_id),

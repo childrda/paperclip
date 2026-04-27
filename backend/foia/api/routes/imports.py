@@ -1,29 +1,41 @@
 """/imports — UI-driven full-pipeline ingestion.
 
-A reviewer drops a `.mbox` file into the browser; the server runs every
-stage of the pipeline (ingest → extract → detect → resolve → propose)
-synchronously and returns a single summary. The CLI tools still exist
-for power users; this endpoint is what the UI uses.
+A reviewer drops a `.mbox` file into the browser; the server creates a
+new ``cases`` row, queues a background job that runs ingest → extract
+→ detect → resolve → propose, and returns the job ID immediately. The
+UI subscribes to /imports/{job_id}/events (SSE) to watch progress in
+real time.
 
-Synchronous on purpose: most district FOIA exports are small enough
-that a 5–60 second request feels acceptable, and the UX is far simpler
-than juggling job IDs / polling. If a district needs to ingest GB-sized
-mailboxes, this endpoint would be replaced by a background-task setup.
+Authentication is required. Imports cannot be initiated by anonymous
+or X-FOIA-Reviewer-only callers.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import sqlite3
-import uuid
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+)
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from ... import audit
+from ... import audit, cases as cases_mod
+from ...config import Config
+from ...db import connect, init_schema
 from ...detection import PiiDetector
 from ...detection_driver import run_detection
 from ...district import DistrictConfig, load_district_config
@@ -32,21 +44,24 @@ from ...extraction import ExtractionOptions
 from ...ingestion import ingest_mbox
 from ...processing import process_attachments
 from ...redaction import propose_from_detections
-from ..deps import get_actor, get_db
+from ..deps import CallerIdentity, get_caller, get_db, require_user
+from fastapi import UploadFile
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 
 
-class ImportSummary(BaseModel):
-    import_id: str
+class ImportSubmitted(BaseModel):
+    job_id: int
+    case_id: int
+    case_name: str
+    bates_prefix: str
     filename: str
     saved_path: str
     label: str | None
-    started_at: str
-    finished_at: str
-    stages: dict
+    status: str
+    submitted_at: str
 
 
 def _district(request: Request) -> DistrictConfig:
@@ -58,49 +73,251 @@ def _district(request: Request) -> DistrictConfig:
     return cfg
 
 
-def _inbox_dir(request: Request) -> Path:
-    cfg = request.app.state.config
+def _inbox_dir(cfg: Config) -> Path:
     inbox: Path = cfg.inbox_dir or Path("./data/inbox").resolve()
     inbox.mkdir(parents=True, exist_ok=True)
     return inbox
 
 
-def _attachment_dir(request: Request) -> Path:
-    cfg = request.app.state.config
-    return cfg.attachment_dir
+# ---------------------------------------------------------------------------
+# Background pipeline runner
+# ---------------------------------------------------------------------------
+
+
+_STAGES = ("ingest", "extract", "detect", "resolve", "propose")
+
+
+def _run_pipeline_job(
+    cfg: Config,
+    district: DistrictConfig,
+    *,
+    job_id: int,
+    case_id: int,
+    saved_path: Path,
+    label: str | None,
+    propose_redactions: bool,
+    actor: str,
+    user_id: int | None,
+) -> None:
+    """Run the whole pipeline against a fresh DB connection (own thread).
+
+    Each stage emits a 'started' event, then 'finished' (or 'failed')
+    with the stats payload. The case status flips to 'ready' on success
+    or 'failed' on the first stage that raises.
+    """
+    conn = connect(cfg.db_path)
+    try:
+        init_schema(conn)
+        _emit = lambda **kw: cases_mod.emit_event(conn, job_id, **kw)
+        cases_mod.update_job_status(
+            conn, job_id, status="running",
+            current_stage="ingest",
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        # ---- Stage 1: ingest
+        try:
+            _emit(stage="ingest", kind="started", message="Reading mailbox…")
+            stats = ingest_mbox(
+                saved_path, conn, cfg.attachment_dir,
+                source_label=label or saved_path.name,
+            )
+            # Tag the freshly-inserted emails to this case.
+            conn.execute(
+                "UPDATE emails SET case_id = ? "
+                "WHERE case_id IS NULL AND mbox_source = ?",
+                (case_id, label or saved_path.name),
+            )
+            conn.commit()
+            _emit(
+                stage="ingest", kind="finished",
+                message=(
+                    f"{stats.emails_ingested} email(s), "
+                    f"{stats.attachments_saved} attachment(s)"
+                ),
+                payload=stats.as_dict(),
+            )
+        except Exception as e:
+            log.exception("ingest stage failed for job %s", job_id)
+            _fail_job(conn, job_id, case_id, "ingest", str(e))
+            return
+
+        # ---- Stage 2: extract
+        try:
+            cases_mod.update_job_status(conn, job_id, status="running",
+                                        current_stage="extract")
+            _emit(stage="extract", kind="started",
+                  message="Extracting attachment text…")
+            extract_opts = ExtractionOptions(
+                ocr_enabled=cfg.ocr_enabled,
+                ocr_language=cfg.ocr_language,
+                ocr_dpi=cfg.ocr_dpi,
+                tesseract_cmd=cfg.tesseract_cmd,
+                office_enabled=cfg.office_enabled,
+                libreoffice_cmd=cfg.libreoffice_cmd,
+                timeout_s=cfg.extraction_timeout_s,
+            )
+            stats = process_attachments(conn, options=extract_opts)
+            _emit(
+                stage="extract", kind="finished",
+                message=(
+                    f"{stats.extracted_ok} ok, "
+                    f"{stats.failed} failed, "
+                    f"{stats.unsupported} skipped"
+                ),
+                payload=stats.as_dict(),
+            )
+        except Exception as e:
+            log.exception("extract stage failed for job %s", job_id)
+            _fail_job(conn, job_id, case_id, "extract", str(e))
+            return
+
+        # ---- Stage 3: detect
+        try:
+            cases_mod.update_job_status(conn, job_id, status="running",
+                                        current_stage="detect")
+            _emit(stage="detect", kind="started",
+                  message="Scanning for PII…")
+            detector = PiiDetector(district.pii)
+            stats = run_detection(conn, detector)
+            _emit(
+                stage="detect", kind="finished",
+                message=f"{stats.detections_written} PII span(s)",
+                payload=stats.as_dict(),
+            )
+        except Exception as e:
+            log.exception("detect stage failed for job %s", job_id)
+            _fail_job(conn, job_id, case_id, "detect", str(e))
+            return
+
+        # ---- Stage 4: resolve
+        try:
+            cases_mod.update_job_status(conn, job_id, status="running",
+                                        current_stage="resolve")
+            _emit(stage="resolve", kind="started",
+                  message="Building person index…")
+            stats = run_resolution(
+                conn, internal_domains=district.email_domains,
+            )
+            _emit(
+                stage="resolve", kind="finished",
+                message=f"{stats.persons_created} person(s)",
+                payload=stats.as_dict(),
+            )
+        except Exception as e:
+            log.exception("resolve stage failed for job %s", job_id)
+            _fail_job(conn, job_id, case_id, "resolve", str(e))
+            return
+
+        # ---- Stage 5: propose redactions
+        try:
+            cases_mod.update_job_status(conn, job_id, status="running",
+                                        current_stage="propose")
+            if propose_redactions:
+                _emit(stage="propose", kind="started",
+                      message="Auto-proposing redactions…")
+                stats = propose_from_detections(conn, district)
+                _emit(
+                    stage="propose", kind="finished",
+                    message=f"{stats.proposed} redaction(s) proposed",
+                    payload=stats.as_dict(),
+                )
+            else:
+                _emit(stage="propose", kind="finished",
+                      message="Skipped per request",
+                      payload={"skipped": True})
+        except Exception as e:
+            log.exception("propose stage failed for job %s", job_id)
+            _fail_job(conn, job_id, case_id, "propose", str(e))
+            return
+
+        # Success.
+        cases_mod.update_job_status(
+            conn, job_id, status="succeeded",
+            current_stage=None,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+        cases_mod.update_case_status(conn, case_id, status="ready")
+        audit.log_event(
+            conn,
+            event_type="import.run",
+            actor=actor, user_id=user_id, origin="api",
+            source_type="case", source_id=case_id,
+            payload={"job_id": job_id, "case_id": case_id},
+        )
+        _emit(
+            stage="done", kind="finished",
+            message="All stages complete.",
+            payload={"case_id": case_id},
+        )
+    finally:
+        conn.close()
+
+
+def _fail_job(
+    conn: sqlite3.Connection,
+    job_id: int,
+    case_id: int,
+    stage: str,
+    error: str,
+) -> None:
+    cases_mod.emit_event(
+        conn, job_id, stage=stage, kind="failed",
+        message=error[:400], payload={"error": error},
+    )
+    cases_mod.update_job_status(
+        conn, job_id, status="failed",
+        failed_stage=stage, error_message=error,
+        finished_at=datetime.now(timezone.utc).isoformat(),
+    )
+    cases_mod.update_case_status(
+        conn, case_id, status="failed",
+        failed_stage=stage, error_message=error,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 
 @router.post(
     "",
-    response_model=ImportSummary,
-    summary="Upload a .mbox and run the full ingest pipeline",
+    response_model=ImportSubmitted,
+    summary="Upload a .mbox; create a case + queue the pipeline as a job.",
 )
 def create_import(
     request: Request,
-    file: UploadFile = File(..., description="The .mbox file to ingest."),
+    file: UploadFile = File(...),
+    name: str | None = Form(default=None),
+    bates_prefix: str | None = Form(default=None),
     label: str | None = Form(default=None),
     propose_redactions: bool = Form(default=True),
     conn: sqlite3.Connection = Depends(get_db),
-    actor: str = Depends(get_actor),
-) -> ImportSummary:
+    caller: CallerIdentity = Depends(require_user),
+) -> ImportSubmitted:
+    cfg: Config = request.app.state.config
+    district = _district(request)
+
     if not file.filename:
         raise HTTPException(400, "missing filename")
-    # Lenient extension check; accept any non-empty mbox-shaped upload.
-    safe_name = Path(file.filename).name  # strip any path components
+    safe_name = Path(file.filename).name
     if not safe_name:
         raise HTTPException(400, "invalid filename")
 
-    cfg = request.app.state.config
-    inbox = _inbox_dir(request)
-    import_id = (
-        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-")
-        + uuid.uuid4().hex[:8]
-    )
-    saved_path = inbox / f"{import_id}__{safe_name}"
+    case_name = (name or "").strip() or f"Case from {safe_name}"
+    prefix = (bates_prefix or "").strip() or district.bates.prefix
 
-    # Persist the upload before doing anything else, so a crash mid-stage
-    # leaves a recoverable file on disk.
-    started_at = datetime.now(timezone.utc).isoformat()
+    case = cases_mod.create_case(
+        conn,
+        name=case_name,
+        bates_prefix=prefix,
+        created_by_user_id=caller.user_id,
+        status="processing",
+    )
+
+    inbox = _inbox_dir(cfg)
+    saved_path = inbox / f"case-{case.id}__{safe_name}"
     try:
         with saved_path.open("wb") as fh:
             shutil.copyfileobj(file.file, fh)
@@ -109,117 +326,229 @@ def create_import(
 
     if saved_path.stat().st_size == 0:
         saved_path.unlink(missing_ok=True)
+        cases_mod.update_case_status(
+            conn, case.id, status="failed",
+            failed_stage="upload", error_message="empty file",
+        )
         raise HTTPException(400, "uploaded file is empty")
 
-    district = _district(request)
-    stages: dict = {}
-
-    # ---- 1. Ingest
-    try:
-        ingest_stats = ingest_mbox(
-            saved_path, conn, _attachment_dir(request),
-            source_label=label or saved_path.name,
-        )
-    except Exception as e:
-        log.exception("ingest stage failed")
-        raise HTTPException(500, f"ingest failed: {e}")
-    stages["ingest"] = ingest_stats.as_dict()
-
-    # ---- 2. Extract
-    extract_opts = ExtractionOptions(
-        ocr_enabled=cfg.ocr_enabled,
-        ocr_language=cfg.ocr_language,
-        ocr_dpi=cfg.ocr_dpi,
-        tesseract_cmd=cfg.tesseract_cmd,
-        office_enabled=cfg.office_enabled,
-        libreoffice_cmd=cfg.libreoffice_cmd,
-        timeout_s=cfg.extraction_timeout_s,
+    job_id = cases_mod.create_job(
+        conn,
+        case_id=case.id,
+        started_by_user_id=caller.user_id,
+        upload_path=str(saved_path),
+        label=label or case_name,
+        propose_redactions=propose_redactions,
     )
-    try:
-        extract_stats = process_attachments(conn, options=extract_opts)
-    except Exception as e:
-        log.exception("extract stage failed")
-        raise HTTPException(500, f"extract failed: {e}")
-    stages["extract"] = extract_stats.as_dict()
-
-    # ---- 3. Detect
-    try:
-        detector = PiiDetector(district.pii)
-        detect_stats = run_detection(conn, detector)
-    except Exception as e:
-        log.exception("detection stage failed")
-        raise HTTPException(500, f"detection failed: {e}")
-    stages["detect"] = detect_stats.as_dict()
-
-    # ---- 4. Resolve
-    try:
-        resolve_stats = run_resolution(
-            conn, internal_domains=district.email_domains,
-        )
-    except Exception as e:
-        log.exception("resolve stage failed")
-        raise HTTPException(500, f"resolve failed: {e}")
-    stages["resolve"] = resolve_stats.as_dict()
-
-    # ---- 5. Propose redactions (optional, on by default)
-    if propose_redactions:
-        try:
-            propose_stats = propose_from_detections(conn, district)
-        except Exception as e:
-            log.exception("propose stage failed")
-            raise HTTPException(500, f"propose failed: {e}")
-        stages["propose"] = propose_stats.as_dict()
-    else:
-        stages["propose"] = {"skipped": True}
-
-    finished_at = datetime.now(timezone.utc).isoformat()
 
     audit.log_event(
         conn,
-        event_type="import.run",
-        actor=actor,
-        origin="api",
-        source_type="mbox",
+        event_type="import.submitted",
+        actor=caller.actor, user_id=caller.user_id, origin="api",
+        source_type="case", source_id=case.id,
         payload={
-            "import_id": import_id,
+            "job_id": job_id,
+            "case_id": case.id,
             "filename": safe_name,
-            "saved_path": str(saved_path),
-            "label": label,
-            "propose_redactions": propose_redactions,
-            "stages": stages,
+            "case_name": case_name,
+            "bates_prefix": prefix,
         },
     )
 
-    return ImportSummary(
-        import_id=import_id,
+    # Spawn the pipeline thread. We use a plain thread (not BackgroundTasks)
+    # because BackgroundTasks would block the response until the job ends.
+    thread = threading.Thread(
+        target=_run_pipeline_job,
+        kwargs=dict(
+            cfg=cfg,
+            district=district,
+            job_id=job_id,
+            case_id=case.id,
+            saved_path=saved_path,
+            label=label or case_name,
+            propose_redactions=propose_redactions,
+            actor=caller.actor,
+            user_id=caller.user_id,
+        ),
+        daemon=True,
+        name=f"pipeline-job-{job_id}",
+    )
+    thread.start()
+
+    return ImportSubmitted(
+        job_id=job_id,
+        case_id=case.id,
+        case_name=case_name,
+        bates_prefix=prefix,
         filename=safe_name,
         saved_path=str(saved_path),
         label=label,
-        started_at=started_at,
-        finished_at=finished_at,
-        stages=stages,
+        status="queued",
+        submitted_at=datetime.now(timezone.utc).isoformat(),
     )
 
 
 @router.get(
+    "/{job_id}",
+    summary="Snapshot of a pipeline job (status + all events to date).",
+)
+def get_import(
+    job_id: int, conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    job = cases_mod.get_job(conn, job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    events = cases_mod.list_events(conn, job_id)
+    return {"job": job, "events": events}
+
+
+@router.get(
+    "/{job_id}/events",
+    summary="Server-Sent Events stream of pipeline progress for this job.",
+)
+def stream_events(
+    job_id: int,
+    request: Request,
+):
+    """Stream pipeline events via SSE.
+
+    Each row in ``pipeline_events`` becomes one ``data:`` line. Closes
+    when the job reaches a terminal state (``succeeded`` / ``failed``).
+    """
+    cfg: Config = request.app.state.config
+
+    def event_stream():
+        # Use a fresh connection — Starlette streams responses on the
+        # event loop thread, but our writer is on a worker thread. The
+        # SQLite connection from the get_db dep can't be shared across
+        # threads. ``check_same_thread=False`` is fine: we're read-only
+        # here.
+        conn = connect(cfg.db_path)
+        try:
+            init_schema(conn)
+            last_id = 0
+            terminal = {"succeeded", "failed", "cancelled"}
+            sleep_s = 0.5
+            # Up to 10 minutes of idle wait — generous; cancel by
+            # disconnecting the client.
+            deadline = time.time() + 600
+            yield "retry: 2000\n\n"
+            while True:
+                events = cases_mod.list_events(conn, job_id, since_id=last_id)
+                for e in events:
+                    last_id = max(last_id, e["id"])
+                    payload = {
+                        "id": e["id"],
+                        "stage": e["stage"],
+                        "kind": e["kind"],
+                        "message": e["message"],
+                        "payload": e.get("payload"),
+                        "event_at": e["event_at"],
+                    }
+                    yield f"event: {e['kind']}\n"
+                    yield f"data: {json.dumps(payload)}\n\n"
+                job = cases_mod.get_job(conn, job_id)
+                if job is None:
+                    yield "event: error\ndata: {\"error\": \"job not found\"}\n\n"
+                    return
+                if job["status"] in terminal:
+                    yield (
+                        "event: done\n"
+                        f"data: {json.dumps({'status': job['status']})}\n\n"
+                    )
+                    return
+                if time.time() > deadline:
+                    yield (
+                        "event: timeout\n"
+                        "data: {\"reason\": \"client idle deadline\"}\n\n"
+                    )
+                    return
+                time.sleep(sleep_s)
+        finally:
+            conn.close()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post(
+    "/{job_id}/retry",
+    summary="Retry a failed job from the failing stage onwards.",
+)
+def retry_import(
+    job_id: int,
+    request: Request,
+    background: BackgroundTasks,
+    conn: sqlite3.Connection = Depends(get_db),
+    caller: CallerIdentity = Depends(require_user),
+):
+    job = cases_mod.get_job(conn, job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if job["status"] != "failed":
+        raise HTTPException(400, f"job is not in failed state: {job['status']}")
+
+    cfg: Config = request.app.state.config
+    district = _district(request)
+    saved_path = Path(job["upload_path"])
+    if not saved_path.exists():
+        raise HTTPException(
+            400,
+            "original upload is no longer on disk; please re-upload the mailbox",
+        )
+
+    # Reset the job state so the SSE stream picks up new events.
+    cases_mod.update_job_status(
+        conn, job_id, status="queued",
+        current_stage=None, error_message=None, failed_stage=None,
+        finished_at=None, started_at=None,
+    )
+    cases_mod.update_case_status(
+        conn, int(job["case_id"]), status="processing",
+    )
+    cases_mod.emit_event(
+        conn, job_id, stage="job", kind="started",
+        message="Retry requested by reviewer.",
+    )
+    audit.log_event(
+        conn,
+        event_type="import.retried",
+        actor=caller.actor, user_id=caller.user_id, origin="api",
+        source_type="case", source_id=int(job["case_id"]),
+        payload={"job_id": job_id},
+    )
+
+    threading.Thread(
+        target=_run_pipeline_job,
+        kwargs=dict(
+            cfg=cfg, district=district,
+            job_id=job_id,
+            case_id=int(job["case_id"]),
+            saved_path=saved_path,
+            label=job["label"],
+            propose_redactions=bool(job["propose_redactions"]),
+            actor=caller.actor,
+            user_id=caller.user_id,
+        ),
+        daemon=True,
+        name=f"pipeline-job-retry-{job_id}",
+    ).start()
+    _ = background  # parameter retained for FastAPI signature stability
+    return {"job_id": job_id, "status": "queued"}
+
+
+@router.get(
     "",
-    summary="List previous imports (derived from the audit log).",
+    summary="List recent imports (newest first).",
 )
 def list_imports(
     conn: sqlite3.Connection = Depends(get_db),
     limit: int = 50,
 ):
-    rows, _ = audit.query_events(
-        conn, event_type="import.run", limit=limit,
-    )
-    return [
-        {
-            "import_id": (r.get("payload") or {}).get("import_id"),
-            "filename": (r.get("payload") or {}).get("filename"),
-            "label": (r.get("payload") or {}).get("label"),
-            "actor": r["actor"],
-            "event_at": r["event_at"],
-            "stages": (r.get("payload") or {}).get("stages", {}),
-        }
-        for r in rows
-    ]
+    return cases_mod.list_jobs(conn, limit=limit)

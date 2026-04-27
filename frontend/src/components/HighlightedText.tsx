@@ -166,14 +166,26 @@ function SpanActions({
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState(redaction.notes ?? "");
 
-  function reviewer(): string {
-    return localStorage.getItem("foia.reviewer") ?? "";
+  // The reviewer's identity comes from the authenticated session — the
+  // backend audit log records user_id directly. We still pass
+  // ``reviewer_id`` so the redaction row carries a human-readable name
+  // when the auditor reads the table later; pull it from the cookie-
+  // backed session via /auth/me on demand.
+  async function fetchReviewerName(): Promise<string | null> {
+    try {
+      const r = await fetch("/api/v1/auth/me", { credentials: "include" });
+      if (!r.ok) return null;
+      const data = (await r.json()) as { username?: string; display_name?: string };
+      return data.display_name || data.username || null;
+    } catch {
+      return null;
+    }
   }
 
   async function transition(status: RedactionStatus) {
-    const who = reviewer().trim();
+    const who = await fetchReviewerName();
     if (!who) {
-      alert("Set your reviewer name in the header before accepting / rejecting.");
+      alert("Your session has expired. Please sign in again.");
       return;
     }
     setBusy(true);

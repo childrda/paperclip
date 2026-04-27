@@ -159,6 +159,59 @@ def _record_occurrence(
     return cur.rowcount > 0
 
 
+def _record_affiliation(
+    conn: sqlite3.Connection,
+    person_id: int,
+    affiliation_type: str,
+    affiliation_value: str,
+    observed_at: str,
+    source_email_id: int | None,
+    now: str,
+) -> None:
+    """Append a timestamped observation. UNIQUE collapses duplicates per email."""
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO person_affiliations (
+            person_id, affiliation_type, affiliation_value,
+            observed_at, source_email_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            person_id, affiliation_type, affiliation_value,
+            observed_at, source_email_id, now,
+        ),
+    )
+
+
+def _record_email_affiliations(
+    conn: sqlite3.Connection,
+    person_id: int,
+    email: str,
+    internal_domains: tuple[str, ...],
+    observed_at: str,
+    source_email_id: int | None,
+    now: str,
+) -> None:
+    """Record raw corpus evidence: the domain this person used at this time.
+
+    We deliberately do *not* persist an ``is_internal`` interpretation —
+    that's a function of the district's current rules, applied at query
+    time over the recorded timeline. Otherwise re-running resolution
+    after a rule change would write contradictory rows against the
+    same source email.
+    """
+    if not email or "@" not in email:
+        return
+    domain = email.rsplit("@", 1)[1].lower()
+    _record_affiliation(
+        conn, person_id, "email_domain", domain,
+        observed_at, source_email_id, now,
+    )
+    # `internal_domains` is consumed at query time (see is_internal_at),
+    # not at storage time.
+    _ = internal_domains
+
+
 def _upsert_identity(
     conn: sqlite3.Connection,
     parsed: ParsedAddress,
@@ -167,6 +220,8 @@ def _upsert_identity(
     internal_domains: tuple[str, ...],
     stats: ResolveStats,
     now: str,
+    *,
+    observed_at: str | None = None,
 ) -> int | None:
     if parsed.is_empty:
         return None
@@ -185,6 +240,16 @@ def _upsert_identity(
         conn, person_id, source_type, source_id, parsed.raw, now
     ):
         stats.occurrences_inserted += 1
+
+    # Temporal classifier: record what the corpus observed about this
+    # person *at the time of this email*. Falls back to the ingest time
+    # if the email has no Date header.
+    when = observed_at or now
+    src_email = source_id if source_type.startswith("email_") else None
+    _record_email_affiliations(
+        conn, person_id, parsed.email,
+        internal_domains, when, src_email, now,
+    )
     return person_id
 
 
@@ -215,7 +280,8 @@ def run_resolution(
     now = _now()
 
     sql = """
-        SELECT id, from_addr, to_addrs, cc_addrs, bcc_addrs, body_text
+        SELECT id, from_addr, to_addrs, cc_addrs, bcc_addrs, body_text,
+               date_sent, ingested_at
         FROM emails
     """
     params: list = []
@@ -228,11 +294,16 @@ def run_resolution(
     for row in rows:
         email_id = int(row["id"])
         stats.emails_scanned += 1
+        # Use the email's own send time as the observation timestamp; the
+        # ingest timestamp is a poor substitute but keeps things working
+        # for malformed mail with no Date header.
+        observed_at = row["date_sent"] or row["ingested_at"]
 
         from_parsed = parse_address(row["from_addr"] or "")
         _upsert_identity(
             conn, from_parsed, SOURCE_FROM, email_id,
             internal_domains, stats, now,
+            observed_at=observed_at,
         )
 
         for field, column, source in (
@@ -245,6 +316,7 @@ def run_resolution(
                 _upsert_identity(
                     conn, parsed, source, email_id,
                     internal_domains, stats, now,
+                    observed_at=observed_at,
                 )
 
         # Signature scan — only the emails found, no name parsing.
@@ -262,11 +334,130 @@ def run_resolution(
             _upsert_identity(
                 conn, parsed, SOURCE_SIG, email_id,
                 internal_domains, stats, now,
+                observed_at=observed_at,
             )
 
         conn.commit()
 
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Temporal classifier query API
+# ---------------------------------------------------------------------------
+
+
+def classify_person_at(
+    conn: sqlite3.Connection,
+    person_id: int,
+    when: str,
+) -> dict[str, dict]:
+    """Return the corpus's view of this person on or before ``when``.
+
+    The result is keyed by ``affiliation_type``. For each type we return
+    the *most recent* observation with ``observed_at <= when``. This is
+    the legally defensible answer to "what did we know about this
+    person on this date?" — later evidence is ignored.
+
+    Returns an empty dict if no observations exist by that date (the
+    person was unknown to the corpus then).
+    """
+    rows = conn.execute(
+        """
+        SELECT a1.affiliation_type, a1.affiliation_value, a1.observed_at,
+               a1.source_email_id
+        FROM person_affiliations a1
+        WHERE a1.person_id = ?
+          AND a1.observed_at <= ?
+          AND a1.observed_at = (
+              SELECT MAX(a2.observed_at)
+              FROM person_affiliations a2
+              WHERE a2.person_id = a1.person_id
+                AND a2.affiliation_type = a1.affiliation_type
+                AND a2.observed_at <= ?
+          )
+        """,
+        (person_id, when, when),
+    ).fetchall()
+    out: dict[str, dict] = {}
+    for r in rows:
+        # Multiple values may share the most-recent timestamp — keep
+        # all of them under the same type.
+        prev = out.get(r["affiliation_type"])
+        if prev is None:
+            out[r["affiliation_type"]] = {
+                "value": r["affiliation_value"],
+                "values": [r["affiliation_value"]],
+                "observed_at": r["observed_at"],
+                "source_email_id": r["source_email_id"],
+            }
+        else:
+            prev["values"].append(r["affiliation_value"])
+    return out
+
+
+def is_internal_at(
+    conn: sqlite3.Connection,
+    person_id: int,
+    when: str,
+    *,
+    internal_domains: tuple[str, ...] | None = None,
+) -> bool | None:
+    """Did this person count as internal on the given date?
+
+    Computed from the corpus evidence (the ``email_domain`` they were
+    using at or before ``when``) against the current district rules
+    (``internal_domains``). If ``internal_domains`` isn't supplied, we
+    fall back to the cached ``persons.is_internal`` flag — useful for
+    UI display where a separate config lookup would be wasteful.
+
+    Returns None when the corpus has no observation by that date.
+    """
+    row = conn.execute(
+        """
+        SELECT affiliation_value
+        FROM person_affiliations
+        WHERE person_id = ?
+          AND affiliation_type = 'email_domain'
+          AND observed_at <= ?
+        ORDER BY observed_at DESC, id DESC
+        LIMIT 1
+        """,
+        (person_id, when),
+    ).fetchone()
+    if row is None:
+        return None
+    domain = row["affiliation_value"]
+    if internal_domains is None:
+        # No rules supplied — defer to cached flag on persons.
+        cached = conn.execute(
+            "SELECT is_internal FROM persons WHERE id = ?", (person_id,)
+        ).fetchone()
+        return bool(cached["is_internal"]) if cached else None
+    return is_internal_email(f"x@{domain}", internal_domains)
+
+
+def affiliation_history(
+    conn: sqlite3.Connection,
+    person_id: int,
+    *,
+    affiliation_type: str | None = None,
+) -> list[dict]:
+    """Full timeline of observations for a person, oldest first."""
+    sql = (
+        "SELECT id, affiliation_type, affiliation_value, observed_at, "
+        "       source_email_id, created_at "
+        "FROM person_affiliations WHERE person_id = ?"
+    )
+    params: list = [person_id]
+    if affiliation_type:
+        sql += " AND affiliation_type = ?"
+        params.append(affiliation_type)
+    sql += " ORDER BY observed_at, id"
+    return [
+        {k: r[k] for k in r.keys()}
+        for r in conn.execute(sql, params).fetchall()
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +564,32 @@ def merge_persons(
         )
     conn.execute(
         "DELETE FROM person_occurrences WHERE person_id = ?", (loser_id,)
+    )
+
+    # Transfer affiliations. The UNIQUE on
+    # (person_id, affiliation_type, affiliation_value, source_email_id)
+    # collapses any duplicates that already exist on the winner side.
+    losing_aff = conn.execute(
+        "SELECT affiliation_type, affiliation_value, observed_at, "
+        "       source_email_id, created_at "
+        "FROM person_affiliations WHERE person_id = ?",
+        (loser_id,),
+    ).fetchall()
+    for r in losing_aff:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO person_affiliations (
+                person_id, affiliation_type, affiliation_value,
+                observed_at, source_email_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                winner_id, r["affiliation_type"], r["affiliation_value"],
+                r["observed_at"], r["source_email_id"], r["created_at"],
+            ),
+        )
+    conn.execute(
+        "DELETE FROM person_affiliations WHERE person_id = ?", (loser_id,)
     )
 
     # Merge name variants.

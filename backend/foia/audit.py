@@ -94,8 +94,15 @@ def log_event(
     source_id: int | None = None,
     payload: dict[str, Any] | None = None,
     origin: str = "cli",
+    user_id: int | None = None,
 ) -> int:
-    """Append one row to ``audit_log``. Returns the new row id."""
+    """Append one row to ``audit_log``. Returns the new row id.
+
+    ``user_id`` ties the event to the local mirror of the directory user
+    (Phase auth). Legacy callers without an authenticated session
+    leave it None and the row falls back to the free-text ``actor``
+    column for attribution.
+    """
     if origin not in ("cli", "api", "system"):
         raise ValueError(f"origin must be cli|api|system; got {origin!r}")
     payload_json = (
@@ -106,14 +113,14 @@ def log_event(
     cur = conn.execute(
         """
         INSERT INTO audit_log (
-            event_at, event_type, actor,
+            event_at, event_type, actor, user_id,
             source_type, source_id,
             payload_json, request_origin
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             datetime.now(timezone.utc).isoformat(),
-            event_type, actor or "system",
+            event_type, actor or "system", user_id,
             source_type, source_id,
             payload_json, origin,
         ),
