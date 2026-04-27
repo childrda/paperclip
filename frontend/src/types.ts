@@ -111,6 +111,101 @@ export interface ExportManifest {
 
 export type AiFlagStatus = "open" | "dismissed" | "promoted";
 
+export interface ImportSummary {
+  import_id: string;
+  filename: string;
+  saved_path: string;
+  label: string | null;
+  started_at: string;
+  finished_at: string;
+  stages: {
+    ingest?: {
+      mbox_source: string;
+      emails_ingested: number;
+      emails_skipped_duplicate: number;
+      attachments_saved: number;
+      errors: number;
+    };
+    extract?: {
+      total: number;
+      extracted_ok: number;
+      extracted_empty: number;
+      unsupported: number;
+      failed: number;
+      skipped_already_done: number;
+    };
+    detect?: {
+      sources_scanned: number;
+      sources_skipped: number;
+      detections_written: number;
+      by_entity: Record<string, number>;
+    };
+    resolve?: {
+      emails_scanned: number;
+      persons_created: number;
+      persons_updated: number;
+      occurrences_inserted: number;
+      signatures_with_extra_emails: number;
+    };
+    propose?:
+      | {
+          detections_seen: number;
+          proposed: number;
+          skipped_existing: number;
+          skipped_no_exemption: number;
+          skipped_invalid: number;
+          by_entity: Record<string, number>;
+        }
+      | { skipped: true };
+  };
+}
+
+export interface ImportListItem {
+  import_id: string | null;
+  filename: string | null;
+  label: string | null;
+  actor: string;
+  event_at: string;
+  stages: ImportSummary["stages"];
+}
+
+export interface SearchHit {
+  source_type: "email" | "attachment";
+  source_id: number;
+  title: string;
+  snippet: string;
+  rank: number;
+  email_id: number | null;
+}
+
+export interface PersonSummary {
+  id: number;
+  display_name: string;
+  primary_email: string | null;
+  is_internal: boolean;
+  occurrences: number;
+}
+
+export interface AuditEvent {
+  id: number;
+  event_at: string;
+  event_type: string;
+  actor: string;
+  source_type: string | null;
+  source_id: number | null;
+  payload: Record<string, unknown> | null;
+  request_origin: string;
+}
+
+export interface ExportListItem {
+  export_id: string;
+  pdf_url: string;
+  csv_url: string;
+  pdf_bytes: number;
+  csv_bytes: number;
+  created_at: string;
+}
+
 export interface AiFlag {
   id: number;
   source_type: string;

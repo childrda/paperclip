@@ -52,6 +52,8 @@ class Config:
     cors_origins: tuple[str, ...] = ()
     # Phase 8
     export_dir: Path | None = None
+    # Post-Phase-10: UI-driven imports
+    inbox_dir: Path | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -80,6 +82,9 @@ class Config:
             ),
             export_dir=Path(
                 os.environ.get("FOIA_EXPORT_DIR", "./data/exports")
+            ).resolve(),
+            inbox_dir=Path(
+                os.environ.get("FOIA_INBOX_DIR", "./data/inbox")
             ).resolve(),
         )
 

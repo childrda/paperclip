@@ -6,7 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Iterator
 
-from fastapi import Depends, Header, HTTPException, Query, Request
+from fastapi import Header, Query, Request
 
 from ..config import Config
 from ..db import connect, init_schema
@@ -20,12 +20,14 @@ def _config(request: Request) -> Config:
 
 
 def get_db(request: Request) -> Iterator[sqlite3.Connection]:
+    """Open a connection, creating + migrating the DB if it doesn't exist.
+
+    The fresh-install path wants the API to auto-create — the import
+    endpoint is the user's first contact with the system. ``connect()``
+    handles the mkdir; ``init_schema()`` is idempotent and applies any
+    pending phase migrations on every open.
+    """
     cfg = _config(request)
-    if not cfg.db_path.exists():
-        raise HTTPException(
-            status_code=503,
-            detail=f"database not found at {cfg.db_path}",
-        )
     conn = connect(cfg.db_path)
     try:
         init_schema(conn)

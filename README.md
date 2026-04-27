@@ -12,25 +12,25 @@ QA layer is optional and disabled by default).
 ## What the system does, end-to-end
 
 ```
-.mbox file
+.mbox file uploaded in the browser
    │
-   │  ingest.py       Parse emails + extract attachments to disk + SQLite
+   │  Ingest        Parse emails + extract attachments to disk + SQLite
    ▼
 SQLite database (data/foia.db)  +  attachments/ on disk
    │
-   │  extract.py      OCR images, parse PDFs, convert Office docs to text
+   │  Extract       OCR images, parse PDFs, convert Office docs to text
    ▼
 attachments_text table
    │
-   │  detect.py       Find SSN / phones / emails / dates / student IDs
+   │  Detect        Find SSN / phones / emails / dates / student IDs
    ▼
 pii_detections table
    │
-   │  resolve.py      Group emails to unified "people"
+   │  Resolve       Group senders/recipients into unified "people"
    ▼
 persons table
    │
-   │  redact.py propose  Auto-create proposed redactions from PII detections
+   │  Propose       Auto-create proposed redactions from PII detections
    ▼
 redactions table  (status='proposed')
    │
@@ -38,13 +38,16 @@ redactions table  (status='proposed')
    ▼
 redactions table  (status='accepted')
    │
-   │  export.py       Burn black boxes into a Bates-numbered PDF
+   │  Export        Burn black boxes into a Bates-numbered PDF
    ▼
 production.pdf  +  redaction_log.csv
 ```
 
-Everything is auditable: a separate `audit_log` table records who did what
-and when, and the SQL trigger blocks anyone from editing it after the fact.
+Steps 1-5 (ingest → propose) all run in one HTTP request when you drop a
+`.mbox` file onto the **Import** page in the UI. Review and export each
+have their own page. Everything is auditable: a separate `audit_log`
+table records who did what and when, and a SQL trigger blocks any edit
+after the fact.
 
 ---
 
@@ -193,152 +196,106 @@ collection errors, your venv is probably not active — go back to Step 3.
 
 ## Your first FOIA case (using the bundled sample)
 
-The repo ships with a synthetic 5-message `.mbox` generator so you can walk
-through every phase before touching real data.
+Everything below happens in the browser. The CLI tools still exist for
+power users and automation (see [The CLI alternative](#the-cli-alternative)
+near the bottom), but the day-to-day reviewer flow is:
 
-Throughout this section, run all commands from inside `backend/` with the
-virtual environment active:
+```
+Open the UI → drop a .mbox file → wait a few seconds →
+review proposed redactions → click "New export" → done.
+```
+
+The repo ships with a synthetic 5-message `.mbox` generator so you can
+walk through the whole experience before touching real data.
+
+### 1. Start the backend
+
+In a terminal, with the venv active and your CWD in `backend/`:
 
 ```bash
 cd backend
-```
-
-### 1. Generate the sample mailbox
-
-```bash
-python scripts/generate_sample_mbox.py tests/fixtures/sample.mbox
-```
-
-Output: `Wrote 5 messages to tests/fixtures/sample.mbox`. The file contains
-a plain text email, an HTML newsletter with tracking pixels (which the
-sanitizer strips), an email with a fake PDF attachment, an email with a
-PNG image, and an email with a forwarded `.eml` inside.
-
-### 2. Ingest the mailbox
-
-```bash
-python ingest.py --file tests/fixtures/sample.mbox --actor "your-name"
-```
-
-Expected output (numbers may vary):
-
-```json
-{
-  "mbox_source": "...sample.mbox",
-  "emails_ingested": 5,
-  "emails_skipped_duplicate": 0,
-  "attachments_saved": 3,
-  "errors": 0
-}
-```
-
-The `--actor` flag tags every audit-log row with your name. It's optional;
-if omitted, the actor defaults to `cli:<your-username>`.
-
-The first run creates `backend/data/foia.db` (the SQLite database) and
-`backend/data/attachments/` (where attachment bytes live). Re-running on
-the same `.mbox` is safe — duplicate messages are skipped.
-
-### 3. Extract searchable text from attachments
-
-```bash
-python extract.py --actor "your-name"
-```
-
-If you didn't install Tesseract or LibreOffice, you'll see two `failed`
-entries — those are the image and the fake PDF, which both need binaries
-this guide marked optional. The `eml_body` extraction of the nested
-forwarded email succeeds. That's fine; on the bundled sample, only the
-nested email has any text content worth scanning.
-
-To force-disable both binaries explicitly:
-
-```bash
-python extract.py --no-ocr --no-office --actor "your-name"
-```
-
-### 4. Detect PII
-
-```bash
-python detect.py --config config/district.example.yaml --actor "your-name"
-```
-
-The example district config ships with built-in Presidio recognizers
-(SSN, phone, email, dates, credit card, US driver's licence, US bank
-number) plus four custom recognizers (8-digit student IDs, district
-employee IDs, lunch account numbers, narrative dates).
-
-On the sample fixture, the detector finds about a dozen spans across
-email subjects and bodies — student IDs, phone numbers, email
-addresses, a date, a lunch account number — plus the email addresses
-inside the nested `.eml`. The exact count is shown in the JSON
-summary the command prints.
-
-### 5. Build unified person records
-
-```bash
-python resolve.py --config config/district.example.yaml --actor "your-name" run
-```
-
-This walks every email and groups the From / To / Cc / Bcc addresses (and
-any extra addresses that appear in body signatures) into unified
-`persons`. On the sample you should see roughly a dozen people created,
-flagged as internal where the email domain matches
-`district.example.org` and external otherwise.
-
-To list them:
-
-```bash
-python resolve.py list
-```
-
-### 6. Auto-propose redactions from the PII detections
-
-```bash
-python redact.py --config config/district.example.yaml --actor "your-name" propose
-```
-
-This converts each PII detection into a `proposed` redaction. **Nothing has
-been redacted yet** — proposals are a starting point that a human reviews.
-
-### 7. Start the API server
-
-```bash
 python serve.py --port 8000
 ```
 
-Leave that running in this terminal window. You can confirm it's up by
-opening <http://localhost:8000/docs> in a browser — that's the auto-
-generated Swagger UI.
+Leave it running. You can sanity-check it by opening
+<http://localhost:8000/docs> in a browser — that's the auto-generated
+Swagger UI for the whole API.
 
-### 8. Start the web UI in a second terminal
+### 2. Start the UI
 
-Open a new terminal, activate the venv if you'd like to keep your tools
-on hand (the UI itself doesn't need Python), and run:
+Open a **second** terminal — the venv doesn't need to be active here:
 
 ```bash
-cd D:\Apps\PaperClip\frontend
+cd D:\Apps\PaperClip\frontend     # or your equivalent path
 npm run dev
 ```
 
-You should see Vite report `Local: http://localhost:5173/`. Open that
-address.
+Vite reports `Local: http://localhost:5173/`. Open that address.
 
-### 9. Review redactions in the UI
+### 3. Set your reviewer name
 
-1. **Type your name** into the **Reviewer** box at the top right. The
-   value persists in your browser, and gets sent on every API write so
-   the audit log knows who's doing what. Without it, accept / reject
-   buttons will refuse to act.
-2. Click an email subject in the table — try **"Bus route change"** or
-   **"Budget draft for 12345678"**, both have several proposed
-   redactions on the body.
-3. Each yellow-highlighted span is a `proposed` redaction. Click it to
-   open a popover and pick **Accept** or **Reject**. Accepted spans
-   turn solid black; rejected ones go grey with a dashed outline.
-4. You can change the exemption code (`FERPA`, `PII`, …) in the
-   popover before clicking Accept. Add a free-form note if you want
-   one in the audit trail.
+In the dark blue header, find the **Reviewer** box and type your name.
+That value is saved in your browser and sent on every API write so the
+audit log knows who's doing what. Without it, the Accept / Reject
+buttons later in this walkthrough refuse to act.
+
+### 4. Generate a sample mailbox (one-time, for the demo)
+
+This is the only command you need a terminal for in the bundled walk-
+through. From `backend/` with the venv active:
+
+```bash
+python scripts/generate_sample_mbox.py /tmp/sample.mbox          # macOS / Linux / Git Bash
+python scripts/generate_sample_mbox.py %TEMP%\sample.mbox        # Windows CMD
+```
+
+Output: `Wrote 5 messages to ...sample.mbox`. The file contains a
+plain-text email, an HTML newsletter with tracking pixels (which the
+sanitizer strips), one email with a fake PDF attachment, one with a
+PNG, and one with a forwarded `.eml` inside. Several emails have
+realistic PII — student IDs, phone numbers, email addresses — in their
+bodies.
+
+(For real cases, your district mail provider exports `.mbox` directly;
+no scripting is needed.)
+
+### 5. Import the mailbox in the UI
+
+Click **Import** in the top nav (it's the default landing page, so
+you should already be there). Drag the `sample.mbox` file into the
+drop target, or use the file picker. Optionally type a case label
+("case-2024-01" etc). Click **Run import**.
+
+A spinner appears for a few seconds. Behind the scenes the server runs
+five stages — ingest, extract, detect, resolve, propose — and reports
+each stage's stats in cards once it finishes. You'll see something
+like:
+
+| Stage    | Headline                          |
+|----------|-----------------------------------|
+| Ingest   | 5 emails, 3 attachments saved     |
+| Extract  | 1 ok, 2 failed (no Tesseract)     |
+| Detect   | 12 detections                     |
+| Resolve  | 11 persons created                |
+| Propose  | 12 redactions proposed            |
+
+A "Recent imports" table at the bottom of the page tracks every
+import you've ever run, with the same headline numbers and the actor.
+
+### 6. Review redactions
+
+Click **Emails** in the top nav. Pick an email — try **"Bus route
+change"** or **"Budget draft for 12345678"**, both have several proposed
+redactions on the body.
+
+Each yellow-highlighted span is a `proposed` redaction. Click any of
+them to open a popover with:
+
+- An exemption-code dropdown (`FERPA`, `PII`, …) — change it before
+  accepting if needed.
+- A free-form note field that ends up in the audit trail.
+- **Accept** (turns the span solid black) and **Reject** (grey with a
+  dashed outline) buttons.
 
 Color legend:
 
@@ -348,40 +305,79 @@ Color legend:
 | Solid black     | accepted  |
 | Dashed grey box | rejected  |
 
+Work through the proposals. Email subjects, plain bodies, and sanitized
+HTML bodies all support the overlay. Attachment text doesn't render in
+the email viewer (yet), but its redactions still get burned into the
+final PDF.
+
+### 7. (Optional) Run AI QA on an email
+
+If you've configured an AI provider (see [AI QA](#ai-qa-optional)
+below — Ollama is free and local), open any email and click the
+**Run AI scan on this email** button at the top right. The model
+returns flags into a new "AI risk flags" section under the body, and
+you can press **Promote** on any flag to create a new `proposed`
+redaction (which still needs Accept). Or **Dismiss** if it's a false
+positive.
+
+The hard rule: **AI never auto-redacts**. Every flag → redaction
+transition is an explicit human action.
+
+### 8. Search
+
+Click **Search** in the top nav. Type a query. Results come from FTS5
+across email subjects, bodies, and extracted attachment text, with
+`<mark>…</mark>` highlights on matching tokens. Punctuation in your
+query is treated as literal — no FTS5 syntax to memorise.
+
+### 9. Browse people
+
+The **Persons** page lists every unified identity the system built
+during entity resolution. Filter by name or by internal-vs-external.
+Helpful for sanity-checking that the same person hasn't accidentally
+been split across multiple email aliases.
+
 ### 10. Export the production PDF
 
-Once you've accepted at least one redaction:
+Click **Exports** in the top nav, then **New export**. After a couple
+of seconds you'll see a manifest with:
 
-- Click the green **Export PDF** button at the top of the email list, or
-- From the CLI: `python export.py --config config/district.example.yaml --out data/exports/case-1`
+- pages written, redactions burned, Bates first/last
+- direct **Download PDF** and **Download CSV** links
 
-The result is two files in `data/exports/<run-id>/`:
+The PDF has every accepted redaction burned in — the redacted text is
+gone from the PDF entirely, not just covered with a black box. Each
+page is Bates-numbered (`ECPS-000001`, `ECPS-000002`, …). The CSV
+maps each burned redaction to the Bates page it appears on, the
+exemption code, the reviewer's name, and the timestamp.
 
-- `production.pdf` — every email and extracted attachment text, with
-  every accepted redaction burned in (the redacted text is **not** in
-  the PDF — it's gone, not just covered with a black box). Each page
-  is Bates-numbered (`ECPS-000001`, `ECPS-000002`, …).
-- `redaction_log.csv` — one row per burned redaction, with the Bates
-  page it appears on, the exemption code, the reviewer's name, and
-  the timestamp.
+The page also lists every prior export so you can re-download an old
+production without re-running.
 
 ### 11. Inspect the audit log
 
+Click **Audit** in the top nav. Every write across the system is here:
+imports, redaction creates / updates / deletes, exports, AI runs and
+promotions. Filter by event type, origin (`api` vs `cli`), or actor.
+Click any row's **Detail** to see the full JSON payload.
+
+The table is append-only. Database triggers reject any `UPDATE` or
+`DELETE` against it — even direct SQL.
+
+### Starting over
+
+To reset between experiments, stop the backend (Ctrl+C in its
+terminal) and from `backend/`:
+
 ```bash
-python -c "import sqlite3; c=sqlite3.connect('data/foia.db'); c.row_factory=sqlite3.Row; [print(r['event_at'][:19], r['event_type'], r['actor']) for r in c.execute('SELECT * FROM audit_log ORDER BY id DESC LIMIT 20')]"
+rm -rf data
 ```
 
-…or hit the API:
+The next import recreates everything.
 
-```
-http://localhost:8000/api/v1/audit
-```
+---
 
-You'll see one row per CLI you ran, plus one per UI action. The audit
-table is append-only — even direct SQL `UPDATE` and `DELETE` against it
-are blocked by triggers.
-
-### 12. (Optional) Run AI QA
+## AI QA (optional)
 
 The AI layer is off by default. To try it locally without paying for
 API access, install [Ollama](https://ollama.com/) and pull a model:
@@ -390,7 +386,9 @@ API access, install [Ollama](https://ollama.com/) and pull a model:
 ollama pull llama3.1
 ```
 
-Then edit `config/district.example.yaml` to flip the AI block on:
+Then edit `backend/config/district.yaml` (copy from
+`district.example.yaml` if you haven't already) and flip the `ai`
+block on:
 
 ```yaml
 ai:
@@ -399,24 +397,15 @@ ai:
   model: llama3.1
 ```
 
-Run a scan:
+Restart the backend. Now the **Run AI scan on this email** button on
+any email-detail page works. Any flags appear in a section below the
+body with **Promote** and **Dismiss** buttons — *promote* creates a
+new `proposed` redaction (still needs Accept), *dismiss* silences the
+flag with a note in the audit trail.
 
-```bash
-python qa.py --config config/district.example.yaml --actor "your-name" run
-```
-
-Any flags it produces appear in the email-detail page under "AI risk
-flags". **AI never auto-redacts** — for each flag a human can press
-**Promote** to create a `proposed` redaction (which still has to be
-accepted in the normal flow), or **Dismiss** to silence it.
-
-For OpenAI / Azure / Anthropic, set the API key as an environment
-variable before running `qa.py`:
-
-| Variable             | When to use                       |
-|----------------------|-----------------------------------|
-| `FOIA_AI_API_KEY`    | The default lookup name           |
-| Set the YAML's `ai.api_key_env` to a different name to override. |     |
+For OpenAI / Azure / Anthropic, the same `ai:` block applies; just set
+the provider and model, and supply the API key via an environment
+variable before launching the backend:
 
 ```bash
 # Windows PowerShell
@@ -431,29 +420,41 @@ export FOIA_AI_API_KEY=sk-...
 
 ---
 
+## The CLI alternative
+
+The browser flow described above calls every operation through the
+HTTP API; the same operations are also available as CLIs in `backend/`
+for power users, automation, and unattended ingest jobs:
+
+| CLI            | Purpose                                                 |
+|----------------|---------------------------------------------------------|
+| `ingest.py`    | One mailbox into SQLite                                 |
+| `extract.py`   | OCR / parse attachments                                 |
+| `detect.py`    | Run PII detection                                       |
+| `resolve.py`   | Build / merge / rename `persons`                        |
+| `redact.py`    | Propose / accept / reject / delete redactions           |
+| `export.py`    | Generate the redacted PDF + CSV                         |
+| `qa.py`        | AI QA scan / dismiss / promote                          |
+| `evaluate.py`  | Precision / recall against the synthetic dataset        |
+
+Every CLI takes `--actor <name>` (recorded in the audit log just like
+the UI does via `X-FOIA-Reviewer`) and `--config <path>` (district
+YAML). See `python <cli>.py --help` for each one's flags, or
+`backend/README.md` for the per-phase technical docs.
+
+---
+
 ## Using your own real .mbox
 
-The pipeline is identical. Just point `ingest.py` at your mailbox file:
+The flow is identical to the bundled walkthrough — drop the file into
+the **Import** page, fill in the case label, click Run import. The
+server happily ingests `.mbox` files in the hundreds-of-megabytes range;
+the request is synchronous, so the browser shows a spinner until every
+stage finishes (typically tens of seconds for a few thousand emails).
 
-```bash
-python ingest.py --file "/path/to/your-export.mbox" --label "case-2024-001"
-```
-
-The `--label` flag is a free-form string saved on every email so you can
-filter productions later (e.g. by case number).
-
-### Starting over
-
-If you want a clean slate (after experimenting with the sample, for
-instance), close the API server and delete the database and attachment
-folders:
-
-```bash
-# from backend/
-rm -rf data
-```
-
-The next `ingest.py` run will recreate them.
+If you have *several* mailbox exports for the same case, just import
+them in sequence — duplicate Message-IDs are skipped automatically, so
+re-uploading is harmless.
 
 ---
 
@@ -624,6 +625,8 @@ endpoint does, design tradeoffs, etc — see
 
 ## Status
 
-All ten phases of the build plan are implemented. The project ships with
-**340 backend tests** and a TypeScript-strict-mode-clean frontend. The
-test suite runs without any optional binaries and in a few seconds.
+All ten phases of the build plan are implemented, plus a UI-driven
+import flow on top so the day-to-day experience is browser-only. The
+project ships with **346 backend tests** and a TypeScript-strict-mode-
+clean frontend. The test suite runs without any optional binaries and
+in under a minute.

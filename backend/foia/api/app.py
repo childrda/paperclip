@@ -23,6 +23,7 @@ from .routes import (
     detections,
     emails,
     exports,
+    imports as imports_routes,
     persons,
     redactions,
     search,
@@ -41,7 +42,7 @@ def create_app(config: Config | None = None) -> FastAPI:
             "PII detections, and unified person records. "
             "Write operations happen via the project's CLI tools."
         ),
-        version="0.10.0",
+        version="0.11.0",
     )
     app.state.config = cfg
 
@@ -91,6 +92,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     app.include_router(exports.router, prefix=api_prefix)
     app.include_router(audit_routes.router, prefix=api_prefix)
     app.include_router(ai_routes.router, prefix=api_prefix)
+    app.include_router(imports_routes.router, prefix=api_prefix)
 
     return app
 

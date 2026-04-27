@@ -105,6 +105,30 @@ export default function EmailDetailPage() {
     }
   }
 
+  const [aiScanBusy, setAiScanBusy] = useState(false);
+  async function runAiScan() {
+    if (aiScanBusy) return;
+    setAiScanBusy(true);
+    try {
+      const r = await api.runAiQa({ email_id: emailId });
+      // After scan completes, reload AI flags for this email.
+      const flags = await api.listAiFlags({ source_id: emailId, limit: 200 });
+      setAiFlags(flags.items.filter((f) => f.source_type.startsWith("email_")));
+      const totalNew = r.flags_written ?? 0;
+      const skipped = r.flags_skipped_existing ?? 0;
+      const noun = totalNew === 1 ? "new flag" : "new flags";
+      alert(
+        `AI scan complete: ${totalNew} ${noun}` +
+          (skipped ? ` (${skipped} already existed).` : "."),
+      );
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      alert(`AI scan failed: ${msg}`);
+    } finally {
+      setAiScanBusy(false);
+    }
+  }
+
   if (loading) return <p className="muted">Loading…</p>;
   if (error) return <div className="error">{error}</div>;
   if (!email) return <p className="muted">Email not found.</p>;
@@ -119,9 +143,21 @@ export default function EmailDetailPage() {
 
   return (
     <>
-      <p>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          marginBottom: 8,
+        }}
+      >
         <Link to="/emails">← Back to list</Link>
-      </p>
+        <span style={{ marginLeft: "auto" }}>
+          <button onClick={runAiScan} disabled={aiScanBusy}>
+            {aiScanBusy ? "Scanning…" : "Run AI scan on this email"}
+          </button>
+        </span>
+      </div>
 
       <div className="detail-section">
         <h2>Headers</h2>

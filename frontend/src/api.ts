@@ -4,13 +4,19 @@
 import type {
   AiFlag,
   AiFlagStatus,
+  AuditEvent,
   EmailDetail,
   EmailSummary,
   ExemptionCode,
+  ExportListItem,
   ExportManifest,
+  ImportListItem,
+  ImportSummary,
   Page,
+  PersonSummary,
   Redaction,
   RedactionStatus,
+  SearchHit,
   Stats,
 } from "./types";
 
@@ -146,6 +152,67 @@ export const api = {
       body: JSON.stringify(args),
     });
   },
+
+  async uploadImport(args: {
+    file: File;
+    label?: string;
+    propose_redactions?: boolean;
+    onProgress?: (pct: number | null) => void;
+  }): Promise<ImportSummary> {
+    // multipart upload — needs raw fetch (the JSON wrapper sets the wrong
+    // Content-Type). We still send X-FOIA-Reviewer.
+    const fd = new FormData();
+    fd.append("file", args.file);
+    if (args.label) fd.append("label", args.label);
+    fd.append(
+      "propose_redactions",
+      args.propose_redactions === false ? "false" : "true",
+    );
+    const res = await fetch("/api/v1/imports", {
+      method: "POST",
+      body: fd,
+      headers: reviewerHeader(),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new ApiError(res.status, text);
+    }
+    return (await res.json()) as ImportSummary;
+  },
+
+  async listImports(): Promise<ImportListItem[]> {
+    return request("/api/v1/imports");
+  },
+
+  async search(q: string, scope?: "emails" | "attachments"): Promise<Page<SearchHit>> {
+    return request(`/api/v1/search${qs({ q, scope, limit: 50 })}`);
+  },
+
+  async listPersons(args: {
+    is_internal?: boolean;
+    name_contains?: string;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<Page<PersonSummary>> {
+    return request(`/api/v1/persons${qs(args as Record<string, unknown>)}`);
+  },
+
+  async listExports(): Promise<ExportListItem[]> {
+    return request("/api/v1/exports");
+  },
+
+  async listAudit(args: {
+    event_type?: string;
+    actor?: string;
+    origin?: string;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<Page<AuditEvent>> {
+    return request(`/api/v1/audit${qs(args as Record<string, unknown>)}`);
+  },
 };
+
+// Re-export so the multipart upload can use the same header helper.
+export { reviewerHeader };
 
 export { ApiError };
