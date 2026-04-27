@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+data/
+backend/data/
+backend/tests/fixtures/*.mbox
+!backend/tests/fixtures/.gitkeep
+
+# Phase 7 frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local IDE / tooling
+.claude/
+.idea/
+.vscode/

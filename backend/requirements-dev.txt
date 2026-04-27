@@ -1,0 +1,3 @@
+# Test-only dependencies. reportlab is now a runtime dep (Phase 8 export),
+# so this file currently just re-exports the runtime set.
+-r requirements.txt

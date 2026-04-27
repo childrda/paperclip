@@ -1,0 +1,21 @@
+bleach==6.2.0
+beautifulsoup4==4.12.3
+python-dotenv==1.0.1
+pytest==8.3.3
+
+# Phase 2 — attachment processing + OCR
+pypdf==5.1.0
+pypdfium2==4.30.0
+Pillow==11.0.0
+pytesseract==0.3.13
+
+# Phase 3 — PII detection + YAML district config
+presidio-analyzer==2.2.355
+PyYAML==6.0.2
+
+# Phase 5 — FastAPI backend
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+
+# Phase 8 — PDF export with burned-in redactions, Bates numbering
+reportlab==4.2.5

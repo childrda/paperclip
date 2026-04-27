@@ -1,0 +1,130 @@
+# FOIA Redaction Tool — per-district configuration.
+#
+# Every district-specific setting lives in this single file. Copy to
+# `district.yaml` (or whichever path you set in FOIA_CONFIG_FILE) and
+# tailor it. No code changes should be needed per district.
+#
+# Keys for phases not yet implemented (exemption_codes, bates, ai) are
+# scaffolded here so the file shape is stable. They are currently unused.
+
+district:
+  name: "Example County Public Schools"
+  # Email domains the district considers "internal". Reserved for phase 4
+  # entity resolution.
+  email_domains:
+    - example.k12.va.us
+    - district.example.org
+
+pii_detection:
+  # Which built-in Presidio recognizers to enable. Omit to enable all
+  # pattern-based defaults (SSN, phone, email, DATE_TIME, US_DRIVER_LICENSE,
+  # CREDIT_CARD, IBAN, IP_ADDRESS, MEDICAL_LICENSE, US_BANK_NUMBER).
+  builtins:
+    - US_SSN
+    - PHONE_NUMBER
+    - EMAIL_ADDRESS
+    - DATE_TIME
+    - CREDIT_CARD
+    - US_DRIVER_LICENSE
+    - US_BANK_NUMBER
+
+  # Minimum acceptable confidence score. Detections below this are dropped.
+  # Kept low on purpose — "missing PII is unacceptable".
+  min_score: 0.3
+
+  # Enable PERSON name detection. Requires spaCy and en_core_web_sm; see
+  # the Phase 3 section in README for install notes.
+  enable_ner: false
+  ner_language: en
+
+  # Custom district-specific recognizers. Each compiles to a Presidio
+  # PatternRecognizer.
+  custom_recognizers:
+    - name: "Student ID (8-digit)"
+      entity_type: STUDENT_ID
+      patterns:
+        - regex: '\b\d{8}\b'
+          score: 0.55
+      context: [student, pupil, learner, id]
+
+    - name: "District Employee ID"
+      entity_type: EMPLOYEE_ID
+      patterns:
+        - regex: '\bECPS-\d{5}\b'
+          score: 0.95
+
+    - name: "Lunch Account Number"
+      entity_type: LUNCH_ACCT
+      patterns:
+        - regex: '\bLA\d{6}\b'
+          score: 0.85
+      context: [lunch, meal, account]
+
+    # Presidio's built-in DateRecognizer covers numeric formats only.
+    # Narrative dates — "April 15, 2024", "15 April 2024" — are caught here.
+    - name: "Narrative date"
+      entity_type: DATE_TIME
+      patterns:
+        - regex: '\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b'
+          score: 0.6
+        - regex: '\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b'
+          score: 0.6
+
+# FOIA exemption codes accepted by Phase 6 redactions. Districts can add
+# any codes they cite in practice; the API validates against this list.
+exemption_codes:
+  - code: FERPA
+    description: "Family Educational Rights and Privacy Act"
+  - code: HIPAA
+    description: "Health Insurance Portability and Accountability Act"
+  - code: "§2.2-3705.4"
+    description: "Virginia code — scholastic records exemption"
+  - code: PII
+    description: "Personal identifying information unrelated to a specific statute"
+
+# Phase 6 — auto-proposal mapping from PII entity type to exemption code.
+# `redact propose` uses these to seed proposed redactions. Anything not
+# listed falls back to default_exemption; if that's null, those entities
+# are skipped (and reported in the propose stats).
+redaction:
+  default_exemption: FERPA
+  entity_exemptions:
+    US_SSN: PII
+    CREDIT_CARD: PII
+    US_BANK_NUMBER: PII
+    US_DRIVER_LICENSE: PII
+    EMAIL_ADDRESS: FERPA
+    PHONE_NUMBER: FERPA
+    DATE_TIME: FERPA
+    STUDENT_ID: FERPA
+    EMPLOYEE_ID: FERPA
+    LUNCH_ACCT: FERPA
+
+# Phase 8 — Bates numbering. Unused in Phase 3.
+bates:
+  prefix: ECPS
+  start: 1
+  width: 6
+
+# Phase 10 — AI QA layer. Optional, off by default.
+#
+# provider: null | openai | anthropic | azure | ollama
+#   * null     — no calls; provider returns []. Use to disable safely.
+#   * openai   — OpenAI-style /v1/chat/completions
+#   * azure    — same shape, requires base_url to your Azure deployment
+#   * ollama   — same shape, default base_url http://localhost:11434/v1
+#   * anthropic— /v1/messages with x-api-key header
+#
+# Reads the API key from the env var named in api_key_env (default
+# FOIA_AI_API_KEY). The key never appears in this file.
+#
+# AI output is *advisory only* — flags must be explicitly promoted to
+# redactions by a human via the qa CLI or /api/v1/ai-flags/{id}/promote.
+ai:
+  enabled: false
+  provider: null
+  model: null
+  base_url: null
+  api_key_env: FOIA_AI_API_KEY
+  max_input_chars: 8000
+  request_timeout_s: 60
