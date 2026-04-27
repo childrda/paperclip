@@ -16,10 +16,11 @@ strict phases. Currently implemented:
 - **Phase 4** — entity resolution (unified person records with manual override)
 - **Phase 5** — FastAPI backend with pagination, filtering, and FTS5 full-text search
 - **Phase 6** — non-destructive redaction system (spans, exemption codes, CRUD API, human approval gate)
-- **Phase 7** — minimal React + TypeScript review UI (PII highlights, accept/reject, reviewer-name persisted)
+- **Phase 7** — minimal React + TypeScript review UI (PII highlights, accept/reject)
 - **Phase 8** — PDF export with burned-in redactions, Bates numbering, exemption-code stamps, and a per-redaction CSV log
 - **Phase 9** — append-only audit log: every write across CLIs and API records actor + timestamp + payload, with DB-level UPDATE/DELETE blocked by triggers
 - **Phase 10** — optional AI QA layer (Ollama / OpenAI / Azure / Anthropic) — advisory only; AI never auto-redacts, only flags are produced and a human must promote each one
+- **Post-Phase-10 (UX layer)** — LDAPS authentication, first-class cases, background pipeline jobs with Server-Sent-Events progress, temporal entity classifier, multi-OS launchers. See "[Post-Phase-10 — Orchestration & Auth Layer](#post-phase-10--orchestration--auth-layer)" near the end of this file for the full reference.
 
 ## Phase 1 — Ingestion Engine
 
@@ -1021,3 +1022,242 @@ up for the later Docker Compose stack:
 The backend `Dockerfile` (added in Phase 3) bakes in tesseract and
 LibreOffice so the optional binary deps become mandatory in the image.
 See the Docker section above.
+
+---
+
+## Post-Phase-10 — Orchestration & Auth Layer
+
+This section covers the changes layered on top of the ten-phase
+engine to make the system usable by a non-technical FOIA officer:
+real authentication, first-class case management, background
+pipeline jobs with live progress, and the temporal entity classifier.
+
+The Phase 1–10 modules under `foia/` are unchanged. Everything below
+either *adds* tables/modules or wires the existing ones into a
+multi-user front door.
+
+### Schema additions
+
+| Table                   | Purpose                                                                            |
+|-------------------------|------------------------------------------------------------------------------------|
+| `users`                 | Local mirror of the directory user, populated on first successful LDAPS login. Stores username, directory_dn, display_name, email, is_active. |
+| `user_sessions`         | Issued session tokens (stored as SHA-256 hashes), with `expires_at`, `last_refresh_at`, `last_group_check_at`, `revoked_at`. |
+| `auth_failed_logins`    | Append-only log of failed login attempts. Drives the lockout policy.               |
+| `cases`                 | One row per FOIA production. `bates_prefix`, `status` (`processing` / `ready` / `failed` / `exported` / `archived`), `created_by` FK to `users`, `error_message`, `failed_stage`. |
+| `pipeline_jobs`         | Background job per `cases` row. Tracks status, current stage, started/finished timestamps, and the upload path so a failure is recoverable. |
+| `pipeline_events`       | Append-only per-stage progress events. The SSE endpoint replays this table to clients in real time. |
+| `person_affiliations`   | Time-stamped corpus evidence per person (currently `email_domain` rows tagged with `observed_at = email.date_sent`). Powers the temporal classifier. |
+
+Two columns were added to existing tables via the migration in
+`db.py::_migrate_legacy_columns`:
+
+- `emails.case_id` (nullable; legacy rows stay NULL).
+- `audit_log.user_id` (nullable FK to `users`; legacy rows stay NULL).
+
+### Authentication
+
+`foia/auth_service.py` is the single entry point. It enforces:
+
+- **LDAPS only.** `PAPERCLIP_LDAP_URI` must start with `ldaps://`. Plain
+  `ldap://` is rejected at adapter construction time (HTTP 500); STARTTLS
+  is not used as a fallback. TLS validation is mandatory.
+- **Service-account bind**, search for the user's DN, then **rebind as
+  the user** with the supplied password.
+- **Group membership check** against `PAPERCLIP_LDAP_GROUP_DN` after a
+  successful bind. Failure here is treated identically to a wrong
+  password from the client's perspective (generic 401, the reason is
+  recorded only in the audit log).
+- **Lockout** after `PAPERCLIP_AUTH_LOCKOUT_THRESHOLD` failures within
+  `PAPERCLIP_AUTH_LOCKOUT_WINDOW_MINUTES` (defaults: 5 / 15). The
+  lockout itself emits a `auth.login_failed` audit row with
+  `reason='lockout'`.
+- **Session tokens** are 32 random bytes hex-encoded (64 chars). Only
+  the SHA-256 hash is stored; the plaintext token only ever appears
+  in the `Set-Cookie` header.
+- **Group re-check on cadence.** `verify_session_token` calls the
+  group adapter again every `PAPERCLIP_AUTH_GROUP_RECHECK_MINUTES`
+  during normal request flow. Removing a user from the FOIA group
+  revokes their access on the *next request*, not the next login.
+- **Dev mode** (`PAPERCLIP_AUTH_DEV_MODE=true`) bypasses LDAPS and
+  accepts any password for users in `PAPERCLIP_AUTH_DEV_USERS`. The
+  startup log emits a WARNING; tests rely on this path so they don't
+  need a real DC.
+
+| Endpoint                       | Notes                                                  |
+|--------------------------------|--------------------------------------------------------|
+| `POST /api/v1/auth/login`      | Body `{username, password}`. Sets `paperclip_session` cookie. |
+| `GET /api/v1/auth/me`          | 200 with current user, 401 without a cookie.           |
+| `POST /api/v1/auth/logout`     | Revokes the session row (sets `revoked_at`).           |
+
+The session cookie is `HttpOnly; SameSite=Lax`. `Secure` defaults to
+`False` (flip to `True` in production behind HTTPS).
+
+### Identity flow into the audit log
+
+`foia/api/deps.py::get_caller` resolves the caller for every request:
+
+- If a valid session cookie is present, returns the real user
+  (`actor=username, user_id=<users.id>`).
+- If no cookie or an invalid one, falls back to the legacy
+  `X-FOIA-Reviewer` header (`actor=<header value>, user_id=None`).
+  The CLI suite and the older API tests rely on this fallback. In
+  production with LDAPS configured, the fallback is unused.
+- If neither is present: `actor='api:anonymous', user_id=None`.
+
+Every existing write router (`redactions`, `exports`, `ai`, `imports`,
+the new `cases`) was updated to consume `CallerIdentity` and pass
+both `actor=` and `user_id=` into `audit.log_event`. Reads still go
+through the lighter `get_actor` path.
+
+`require_user` is the strict variant — it raises 401 on any caller
+without a real session. Used today by `POST /api/v1/imports` (case
+creation must be attributable) and `PATCH /api/v1/cases/{id}/status`.
+
+### Cases & background pipeline jobs
+
+`foia/cases.py` is the model layer:
+
+```python
+create_case(conn, name=, bates_prefix=, created_by_user_id=) -> Case
+get_case(conn, case_id) -> Case
+list_cases(conn, status=None, limit, offset) -> (list[Case], total)
+update_case_status(conn, case_id, status=, ...)
+case_stats(conn, case_id) -> {emails, attachments, pii_detections, redactions, redactions_accepted}
+
+create_job(conn, case_id, started_by_user_id, upload_path, label, propose_redactions) -> int
+get_job(conn, job_id) -> dict
+list_jobs(conn, case_id=None, limit) -> list[dict]
+update_job_status(conn, job_id, status=, current_stage=, ...)
+emit_event(conn, job_id, stage=, kind=, message=, payload=) -> int
+list_events(conn, job_id, since_id=0) -> list[dict]
+```
+
+`foia/api/routes/imports.py` orchestrates the upload:
+
+1. `POST /api/v1/imports` (multipart):
+   - Saves the upload to `FOIA_INBOX_DIR/case-{id}__{filename}` *before*
+     any pipeline work, so a crash mid-stage leaves the file on disk
+     for retry.
+   - Creates a `cases` row (`status=processing`, with the supplied
+     name + Bates prefix; the prefix falls back to the district
+     YAML's `bates.prefix` if omitted).
+   - Creates a `pipeline_jobs` row (`status=queued`).
+   - Spawns a daemon thread that runs the five Phase 1–6 stages
+     against a fresh DB connection and emits events.
+   - Returns 200 immediately with `{job_id, case_id, ...}`. The HTTP
+     response does *not* block on the pipeline.
+
+2. `GET /api/v1/imports/{job_id}` returns `{job, events}` — useful
+   for the case detail page or for tests that want a snapshot.
+
+3. `GET /api/v1/imports/{job_id}/events` is the **Server-Sent Events
+   stream**. `event:` lines mirror the event's `kind`
+   (`started`, `progress`, `finished`, `failed`, `done`); `data:`
+   lines are JSON of the event row. The stream closes when the job
+   reaches a terminal state.
+
+4. `POST /api/v1/imports/{job_id}/retry` re-queues the job in place.
+   The job row is reset (`status=queued`, `failed_stage=NULL`), the
+   case row flips back to `processing`, and a new thread runs from
+   the saved upload. Idempotent: each stage's `INSERT OR IGNORE`
+   guards keep re-runs from duplicating work.
+
+Failure handling: the first stage that raises is logged via
+`_fail_job`. The job ends in `status=failed` with `failed_stage` set,
+the case mirrors that state, and the SSE stream sends a final `event:
+failed` followed by `event: done` so the UI knows to render the retry
+button.
+
+### Cases API
+
+| Endpoint                                  | Notes                                                  |
+|-------------------------------------------|--------------------------------------------------------|
+| `GET  /api/v1/cases`                      | Filters: `status`. Paginated.                          |
+| `GET  /api/v1/cases/{case_id}`            | Returns `{case, stats, latest_job}`.                   |
+| `PATCH /api/v1/cases/{case_id}/status`    | Body `{status}`. Auth-required. Audit-logged.          |
+
+### Temporal entity classifier
+
+`foia/er_driver.py` was updated:
+
+- `_record_email_affiliations` now logs **only raw evidence** —
+  `affiliation_type='email_domain'`, `affiliation_value=<domain>`,
+  `observed_at=email.date_sent` (or `ingested_at` if no Date header),
+  `source_email_id=<email>`. The internal/external interpretation is
+  *not* persisted because rules change; recomputing it at query time
+  keeps the timeline honest.
+- `run_resolution` now reads `date_sent` and `ingested_at` from each
+  email and threads them through `_upsert_identity` so the affiliation
+  row is tagged with the right time.
+- `merge_persons` now transfers affiliations onto the winner so
+  manual de-duping doesn't sever the timeline.
+
+New query API:
+
+```python
+classify_person_at(conn, person_id, when) -> dict[type, {value, observed_at, ...}]
+is_internal_at(conn, person_id, when, internal_domains=) -> bool | None
+affiliation_history(conn, person_id, affiliation_type=None) -> list[dict]
+```
+
+`is_internal_at` reads the most recent `email_domain` ≤ `when` and
+applies the supplied `internal_domains` rules at query time. Same
+evidence + new rules = different answer, no rewriting of the
+timeline.
+
+`persons.is_internal` is still maintained at insert time as a
+denormalised cache for fast UI listing; queries that need
+point-in-time correctness should call `is_internal_at`.
+
+`tests/test_temporal_classifier.py` (10 tests) pins down the
+semantics: timeline ordering, domain change over time, merge
+preserves affiliations, rules-change-but-evidence-stays.
+
+### Test counts
+
+```
+backend/tests/  31 files, 386 tests passing
+```
+
+Everything that ran before still runs; the additions are:
+
+- `test_temporal_classifier.py` — 10
+- `test_auth_service.py` — 17
+- `test_auth_api.py` — 10
+- `test_imports_pipeline.py` — 9
+
+The legacy `test_imports_api.py` was deleted because the synchronous
+`/imports` endpoint it covered no longer exists.
+
+### Frontend layer
+
+The UI was rebuilt around the new flow:
+
+- `frontend/src/auth.tsx` — `AuthProvider` + `RequireAuth` HOC. Reads
+  `/api/v1/auth/me` on mount.
+- `pages/LoginPage.tsx` — username/password form. Generic error
+  message for any failure (matches the API).
+- `pages/CasesPage.tsx` — case list with status pill and auto-refresh
+  while any case is processing.
+- `pages/NewCasePage.tsx` — name + Bates prefix + file drop, then
+  subscribes to the SSE stream and animates a stage list with live
+  counts. Supports retry-from-failed-stage.
+- `pages/CaseDetailPage.tsx` — case header, stats, "Review emails" /
+  "Export production PDF" / "Archive" actions. Polls `/cases/{id}`
+  every 3s while processing.
+- `App.tsx` wraps every protected route in `<RequireAuth>`. The
+  legacy reviewer-name input is gone.
+- `api.ts::reviewerHeader` is intentionally a no-op now;
+  `credentials: 'include'` on every fetch sends the session cookie.
+
+### Distribution
+
+- `docker-compose.yml` at repo root brings up backend + an `nginx:alpine`
+  serving the built frontend bundle. SSE works through nginx because
+  `deploy/nginx.conf` disables proxy buffering on `/api/v1/imports`.
+- `paperclip.bat` / `paperclip.command` / `paperclip.desktop` /
+  `paperclip.sh` are the cross-platform launchers — `docker compose
+  up -d` + `open browser`.
+- `deploy/DESKTOP_BUNDLE.md` records the PyInstaller + pywebview
+  decision for the future single-binary build (out of scope for
+  this release).

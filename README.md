@@ -5,7 +5,7 @@ day-to-day records officer, not the developer. Drop a mailbox export
 in, accept or reject the suggested redactions, click Export, send
 the resulting Bates-numbered PDF.
 
-The original engine — ten phases of pipeline modules with 380+ tests —
+The original engine — ten phases of pipeline modules with 386 tests —
 sits underneath a real case-management UI with directory authentication
 and live-streamed progress.
 
@@ -186,28 +186,36 @@ for this release.
 ### As a developer
 
 ```bash
-# 1. Backend
-cd backend
-python -m venv ../.venv
-../.venv/Scripts/python -m pip install -r requirements.txt
-PAPERCLIP_AUTH_DEV_MODE=true \
-PAPERCLIP_AUTH_DEV_USERS=alice \
-FOIA_CONFIG_FILE=config/district.example.yaml \
-  ../.venv/Scripts/python serve.py --port 8000
+# 1. From the repo root, create + activate a venv.
+python -m venv .venv
+# Windows (CMD/PowerShell):  .venv\Scripts\activate
+# Windows (Git Bash) /
+# macOS / Linux:             source .venv/Scripts/activate   # or .venv/bin/activate
 
-# 2. Frontend (in another terminal)
+# 2. Backend
+cd backend
+python -m pip install -r requirements.txt
+
+# Set dev-mode auth before launching. Pick the syntax for your shell:
+#   bash / zsh: export PAPERCLIP_AUTH_DEV_MODE=true; export PAPERCLIP_AUTH_DEV_USERS=alice
+#   PowerShell: $env:PAPERCLIP_AUTH_DEV_MODE='true'; $env:PAPERCLIP_AUTH_DEV_USERS='alice'
+#   CMD:        set PAPERCLIP_AUTH_DEV_MODE=true && set PAPERCLIP_AUTH_DEV_USERS=alice
+# Then:
+python serve.py --port 8000
+
+# 3. Frontend (in another terminal — venv not required here)
 cd frontend
 npm install
 npm run dev          # http://localhost:5173
 
-# 3. Sign in as `alice` with any password.
+# 4. Sign in as `alice` with any password.
 ```
 
 ### Tests
 
 ```bash
 cd backend
-python -m pytest                    # 380+ tests across all phases
+python -m pytest                    # 386 tests across all phases
 ```
 
 The suite never touches a real DC; LDAPS is exercised through an
@@ -244,8 +252,10 @@ The Phase 1–10 modules under `backend/foia/` (ingestion, extraction,
 detection, redaction, export, AI, audit) are reused as-is. The
 non-destructive redaction model, append-only audit log triggers, AI
 "never auto-redacts" rule, per-district YAML, and FTS5 search are
-all carried forward without restructuring. The 380+ tests for the
-phase modules still pass.
+all carried forward without restructuring. All 340 tests for the
+phase modules still pass; 46 new tests cover the auth, temporal
+classifier, cases, and background-imports work added in this pass
+(386 total).
 
 ## Repository layout
 
@@ -278,7 +288,7 @@ paperclip/
 │   │   ├── ai.py                  Phase 10
 │   │   ├── schema.sql
 │   │   └── ...
-│   ├── tests/                340+ tests, no live DC required
+│   ├── tests/                386 tests, no live DC required
 │   └── ...
 └── frontend/
     └── src/
