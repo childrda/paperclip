@@ -1,9 +1,19 @@
 # Multi-user Paperclip deployment.
 #
-# Single-host setup: backend container + a static-served frontend
-# bundle behind nginx on the same host. Officers double-click the
-# launcher script (paperclip.bat / .command / .desktop) which runs
-# `docker compose up -d` and opens the browser.
+# Two services:
+#   * `backend`   FastAPI + the Phase 1-10 pipeline modules + SQLite.
+#   * `frontend`  nginx serving the React bundle AND reverse-proxying
+#                 /api, /health, /stats to the backend container. The
+#                 React bundle is *built inside Docker* (see
+#                 frontend/Dockerfile), so the host machine never
+#                 needs Node installed.
+#
+# Officers double-click the launcher (paperclip.bat / .command /
+# .desktop) which runs `docker compose up -d --build` and opens the
+# browser at http://localhost:${PAPERCLIP_PORT:-8080}/.
+#
+# `--build` on every launcher run guarantees that source changes
+# (backend Python or frontend TypeScript) are picked up.
 
 services:
   backend:
@@ -35,9 +45,11 @@ services:
       PAPERCLIP_AUTH_LOCKOUT_WINDOW_MINUTES: ${PAPERCLIP_AUTH_LOCKOUT_WINDOW_MINUTES:-15}
       PAPERCLIP_AUTH_SESSION_LIFETIME_HOURS: ${PAPERCLIP_AUTH_SESSION_LIFETIME_HOURS:-8}
       PAPERCLIP_AUTH_GROUP_RECHECK_MINUTES: ${PAPERCLIP_AUTH_GROUP_RECHECK_MINUTES:-15}
-      # Dev mode: only set these on a developer laptop. Never in prod.
-      PAPERCLIP_AUTH_DEV_MODE: ${PAPERCLIP_AUTH_DEV_MODE:-false}
-      PAPERCLIP_AUTH_DEV_USERS: ${PAPERCLIP_AUTH_DEV_USERS:-}
+      # Dev mode: ON by default in this compose file so a brand-new
+      # install can sign in without configuring LDAPS first. Flip to
+      # "false" once you've wired up the directory.
+      PAPERCLIP_AUTH_DEV_MODE: ${PAPERCLIP_AUTH_DEV_MODE:-true}
+      PAPERCLIP_AUTH_DEV_USERS: ${PAPERCLIP_AUTH_DEV_USERS:-alice,bob}
     volumes:
       - ./data:/data
       - ./backend/config:/config:ro
@@ -45,12 +57,14 @@ services:
       - "8000"
 
   frontend:
-    image: nginx:alpine
+    build:
+      # Build context is the repo root so the Dockerfile can copy both
+      # ``frontend/`` source and ``deploy/nginx.conf`` in one image.
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: paperclip-frontend:latest
     restart: unless-stopped
     ports:
       - "${PAPERCLIP_PORT:-8080}:80"
-    volumes:
-      - ./frontend/dist:/usr/share/nginx/html:ro
-      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - backend
