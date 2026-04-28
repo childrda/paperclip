@@ -120,6 +120,18 @@ class _LdapsConfig:
                 "is rejected by policy",
                 http_status=500,
             )
+        if "{username}" not in user_filter:
+            # Without the placeholder, every login produces an LDAP
+            # search that doesn't match the supplied username — every
+            # login would then fail with "user not found", which from
+            # the operator's seat looks like the directory itself is
+            # broken. Fail loudly at startup instead.
+            raise AuthError(
+                "PAPERCLIP_LDAP_USER_FILTER must contain the literal "
+                "'{username}' placeholder. Example: "
+                "(sAMAccountName={username})",
+                http_status=500,
+            )
         self.uri = uri
         self.bind_dn = bind_dn
         self.bind_password = bind_password
@@ -169,8 +181,15 @@ class _Ldap3Adapter:
             raise AuthError("empty password")
         try:
             with self._service_conn() as svc:
-                search_filter = self.cfg.user_filter.format(
-                    username=_escape_ldap(username),
+                # Literal substitution of the ``{username}`` placeholder.
+                # We deliberately do NOT use ``str.format()`` here because
+                # real-world LDAP filters often contain other curly braces
+                # (typos, alternate placeholder syntaxes, copy-pasted DNs)
+                # that would otherwise raise ``ValueError: Single '}'
+                # encountered in format string`` and bounce every login
+                # with a generic 401.
+                search_filter = self.cfg.user_filter.replace(
+                    "{username}", _escape_ldap(username),
                 )
                 svc.search(
                     self.cfg.user_base_dn,

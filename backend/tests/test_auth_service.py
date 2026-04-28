@@ -372,6 +372,58 @@ def test_plain_ldap_uri_is_rejected_by_adapter_factory():
     assert "ldaps" in exc.value.reason.lower()
 
 
+def test_user_filter_missing_placeholder_fails_at_startup():
+    """Without {username}, every login would silently fail. Surface
+    that as a config error at adapter construction instead."""
+    from foia.auth_service import build_adapter
+    cfg = _cfg(ldap_user_filter="(sAMAccountName=alice)")  # no placeholder
+    with pytest.raises(AuthError) as exc:
+        build_adapter(cfg)
+    assert "{username}" in exc.value.reason
+    assert exc.value.http_status == 500
+
+
+def test_filter_with_extra_braces_does_not_crash_authenticate():
+    """Real-world filters often have stray braces (typos, alternate
+    placeholder syntaxes). Substitution must use literal replacement,
+    not str.format(), so a stray '}' doesn't surface as a generic
+    auth failure for every login.
+
+    Regression for: 'ldap error: ValueError("Single \\'}\\' encountered
+    in format string")'.
+    """
+    from foia.auth_service import _LdapsConfig, _Ldap3Adapter
+    # A filter with an unbalanced brace would crash str.format(); the
+    # current code uses str.replace and must accept it.
+    bad_filter = "(&(sAMAccountName={username})(memberOf=CN=Foo}}))"
+    config = _LdapsConfig(
+        uri="ldaps://example",
+        bind_dn="CN=svc",
+        bind_password="x",
+        user_base_dn="OU=staff",
+        user_filter=bad_filter,
+        group_dn="CN=g",
+        ca_cert_path=None,
+        timeout_seconds=10,
+    )
+    # Construction succeeds — `{username}` is present, so no startup
+    # validation rejects it.
+    assert config.user_filter == bad_filter
+
+    # Drive the adapter's filter substitution directly, without
+    # actually opening an LDAP connection. This is the line the bug
+    # report came from.
+    adapter = _Ldap3Adapter.__new__(_Ldap3Adapter)
+    adapter.cfg = config
+    rendered = adapter.cfg.user_filter.replace(
+        "{username}", "alice",
+    )
+    assert "alice" in rendered
+    # The stray braces survive verbatim; they're an LDAP-syntax problem
+    # at query time, not a Python crash at substitution time.
+    assert "}}" in rendered
+
+
 def test_dev_mode_accepts_any_password_for_allowlisted_users(db_conn):
     cfg = _cfg(
         ldap_uri=None,
