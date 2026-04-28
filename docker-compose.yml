@@ -53,6 +53,16 @@ services:
     volumes:
       - ./data:/data
       - ./backend/config:/config:ro
+      # CA cert(s) for the directory's TLS chain.
+      #
+      # Drop your DC's signing CA cert at ``./certs/ca.crt`` (next to
+      # this docker-compose.yml). It will appear inside the container
+      # at ``/etc/paperclip/certs/ca.crt`` — set
+      # ``PAPERCLIP_LDAP_CA_CERT_PATH`` (above) to that path.
+      #
+      # The directory is committed empty (with a ``.gitkeep``) so this
+      # mount always succeeds even before a cert has been dropped in.
+      - ./certs:/etc/paperclip/certs:ro
     expose:
       - "8000"
 

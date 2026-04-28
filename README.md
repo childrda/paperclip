@@ -261,13 +261,14 @@ Example:
       PAPERCLIP_LDAP_USER_BASE_DN: "OU=Staff,DC=lcps,DC=org"
       PAPERCLIP_LDAP_USER_FILTER: "(sAMAccountName={username})"
       PAPERCLIP_LDAP_GROUP_DN: "CN=FOIA-Officers,OU=Groups,DC=lcps,DC=org"
-      PAPERCLIP_LDAP_CA_CERT_PATH: "/config/ca.crt"
+      PAPERCLIP_LDAP_CA_CERT_PATH: "/etc/paperclip/certs/ca.crt"
       PAPERCLIP_AUTH_DEV_MODE: "false"
 ```
 
-Drop the CA certificate at `backend/config/ca.crt` (the
-`PAPERCLIP_LDAP_CA_CERT_PATH` value above maps to that location
-inside the container).
+Drop the CA certificate at `certs/ca.crt` in the Paperclip folder
+(next to `docker-compose.yml`). The compose file mounts that
+directory at `/etc/paperclip/certs/` inside the container, which is
+the path `PAPERCLIP_LDAP_CA_CERT_PATH` points at above.
 
 ### Restart
 

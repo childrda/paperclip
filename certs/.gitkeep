@@ -1,0 +1,9 @@
+# Drop your district's CA certificate here as ``ca.crt`` (PEM-encoded).
+#
+# It appears inside the backend container at
+# ``/etc/paperclip/certs/ca.crt`` (read-only). Reference that path
+# from ``PAPERCLIP_LDAP_CA_CERT_PATH`` in docker-compose.yml or your
+# .env file.
+#
+# This file (.gitkeep) only exists so Git tracks the empty directory;
+# it has no runtime effect.
