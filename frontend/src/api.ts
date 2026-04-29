@@ -78,6 +78,7 @@ export const api = {
     subject_contains?: string;
     from_contains?: string;
     has_pii?: boolean;
+    case_id?: number;
   }): Promise<Page<EmailSummary>> {
     return request(`/api/v1/emails${qs(args)}`);
   },
@@ -197,6 +198,19 @@ export const api = {
     return request(`/api/v1/cases/${id}/status`, {
       method: "PATCH",
       body: JSON.stringify({ status }),
+    });
+  },
+
+  async proposeCaseRedactions(id: number): Promise<{
+    detections_seen: number;
+    proposed: number;
+    skipped_existing: number;
+    skipped_no_exemption: number;
+    skipped_invalid: number;
+    by_entity: Record<string, number>;
+  }> {
+    return request(`/api/v1/cases/${id}/propose-redactions`, {
+      method: "POST",
     });
   },
 

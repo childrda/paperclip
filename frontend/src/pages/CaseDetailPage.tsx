@@ -18,6 +18,7 @@ export default function CaseDetailPage() {
   const [data, setData] = useState<CaseDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [proposing, setProposing] = useState(false);
 
   async function reload() {
     try {
@@ -37,6 +38,30 @@ export default function CaseDetailPage() {
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseId, data?.case.status]);
+
+  async function runPropose() {
+    if (proposing || !data) return;
+    setProposing(true);
+    try {
+      const stats = await api.proposeCaseRedactions(caseId);
+      await reload();
+      const lines = [
+        `${stats.proposed} new redaction(s) proposed.`,
+        stats.skipped_existing > 0
+          ? `${stats.skipped_existing} already existed.`
+          : "",
+        stats.skipped_no_exemption > 0
+          ? `${stats.skipped_no_exemption} skipped — no exemption code mapped for that entity type. Edit district.yaml to map them.`
+          : "",
+      ].filter(Boolean);
+      alert(lines.join("\n"));
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      alert(`Propose failed: ${msg}`);
+    } finally {
+      setProposing(false);
+    }
+  }
 
   async function runExport() {
     if (exporting || !data) return;
@@ -107,6 +132,17 @@ export default function CaseDetailPage() {
         >
           Review emails →
         </button>
+        {data.stats.pii_detections > data.stats.redactions ? (
+          <button
+            disabled={proposing || c.status === "processing"}
+            onClick={runPropose}
+            title="Create proposed redactions for every PII span that doesn't already have one. Safe to re-run."
+          >
+            {proposing
+              ? "Proposing…"
+              : `Propose ${data.stats.pii_detections - data.stats.redactions} redaction(s)`}
+          </button>
+        ) : null}
         <button
           disabled={
             exporting ||

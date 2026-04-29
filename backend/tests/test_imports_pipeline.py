@@ -199,6 +199,79 @@ def test_emails_get_scoped_to_the_case(client):
     assert rows[0]["case_id"] == submit["case_id"]
 
 
+def test_emails_listing_filters_by_case_id(client):
+    """Case-detail's "Review emails →" must show only that case's emails."""
+    _login(client)
+    # Two independent cases, each with a different upload.
+    r1 = client.post(
+        "/api/v1/imports",
+        files={"file": ("a.mbox", _build_mbox_bytes(), "application/octet-stream")},
+        data={"name": "Case A", "bates_prefix": "AAA"},
+    )
+    s1 = r1.json()
+    _wait_for_job(client, s1["job_id"])
+    r2 = client.post(
+        "/api/v1/imports",
+        files={"file": ("b.mbox", _build_mbox_bytes(body_extra="x"), "application/octet-stream")},
+        data={"name": "Case B", "bates_prefix": "BBB"},
+    )
+    s2 = r2.json()
+    _wait_for_job(client, s2["job_id"])
+
+    # Without the filter, the global list returns all emails.
+    all_emails = client.get("/api/v1/emails").json()
+    assert all_emails["total"] == 2
+
+    # With the filter, only that case's email comes back.
+    a = client.get(f"/api/v1/emails?case_id={s1['case_id']}").json()
+    assert a["total"] == 1
+    assert all(e["id"] for e in a["items"])  # sanity
+    b = client.get(f"/api/v1/emails?case_id={s2['case_id']}").json()
+    assert b["total"] == 1
+    assert a["items"][0]["id"] != b["items"][0]["id"]
+
+
+def test_propose_redactions_endpoint_recovers_a_case_with_zero_redactions(client):
+    """An import made with propose_redactions=false leaves PII detections
+    but no redactions. The case-level propose endpoint must close that
+    gap so reviewers have something to accept/reject."""
+    _login(client)
+    r = client.post(
+        "/api/v1/imports",
+        files={"file": ("c.mbox", _build_mbox_bytes(), "application/octet-stream")},
+        data={
+            "name": "no-propose",
+            "bates_prefix": "NP",
+            "propose_redactions": "false",
+        },
+    )
+    submit = r.json()
+    _wait_for_job(client, submit["job_id"])
+
+    case = client.get(f"/api/v1/cases/{submit['case_id']}").json()
+    assert case["stats"]["pii_detections"] >= 2
+    assert case["stats"]["redactions"] == 0  # propose was skipped at import
+
+    # On-demand propose closes the gap.
+    resp = client.post(
+        f"/api/v1/cases/{submit['case_id']}/propose-redactions"
+    )
+    assert resp.status_code == 200, resp.text
+    stats = resp.json()
+    assert stats["proposed"] >= 2
+
+    # Idempotent — re-running just reports them as existing, no new rows.
+    again = client.post(
+        f"/api/v1/cases/{submit['case_id']}/propose-redactions"
+    ).json()
+    assert again["proposed"] == 0
+    assert again["skipped_existing"] >= 2
+
+    # Stats now reflect the redactions.
+    case2 = client.get(f"/api/v1/cases/{submit['case_id']}").json()
+    assert case2["stats"]["redactions"] >= 2
+
+
 def test_default_bates_prefix_falls_back_to_district_yaml(client):
     _login(client)
     payload = _build_mbox_bytes()

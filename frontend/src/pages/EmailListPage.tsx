@@ -1,11 +1,20 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { ApiError, api } from "../api";
 import type { EmailSummary, Page, Stats } from "../types";
 
 const PAGE_SIZE = 25;
 
 export default function EmailListPage() {
+  // The same component renders both the global ``/emails`` list and
+  // the case-scoped ``/cases/:id/emails`` list. ``id`` is only present
+  // on the case-scoped route; when missing we list every email.
+  const { id: caseIdParam } = useParams<{ id: string }>();
+  const caseId =
+    caseIdParam && !Number.isNaN(Number(caseIdParam))
+      ? Number(caseIdParam)
+      : undefined;
+
   const [page, setPage] = useState<Page<EmailSummary> | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
   const [offset, setOffset] = useState(0);
@@ -25,6 +34,7 @@ export default function EmailListPage() {
         offset,
         subject_contains: search || undefined,
         has_pii: hasPii,
+        case_id: caseId,
       })
       .then((p) => {
         if (!aborted) setPage(p);
@@ -40,7 +50,7 @@ export default function EmailListPage() {
     return () => {
       aborted = true;
     };
-  }, [offset, search, hasPii]);
+  }, [offset, search, hasPii, caseId]);
 
   useEffect(() => {
     api.getStats().then(setStats).catch(() => undefined);
@@ -73,6 +83,13 @@ export default function EmailListPage() {
 
   return (
     <>
+      {caseId !== undefined ? (
+        <div className="page-toolbar">
+          <Link to={`/cases/${caseId}`} className="back-link">
+            ← Back to case
+          </Link>
+        </div>
+      ) : null}
       <div className="toolbar">
         <input
           type="text"

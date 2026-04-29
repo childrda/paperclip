@@ -58,9 +58,21 @@ def list_emails(
     mbox_source: Optional[str] = Query(
         None, description="Exact-match filter on mbox_source."
     ),
+    case_id: Optional[int] = Query(
+        None,
+        description=(
+            "Restrict to emails belonging to a specific case. "
+            "Reviewers click into a case from /cases and expect to see "
+            "only that case's emails — without this filter the list is "
+            "global across the database."
+        ),
+    ),
 ):
     where: list[str] = []
     params: list = []
+    if case_id is not None:
+        where.append("case_id = ?")
+        params.append(case_id)
     if from_contains:
         where.append("LOWER(from_addr) LIKE ?")
         params.append(f"%{from_contains.lower()}%")

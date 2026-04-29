@@ -347,6 +347,7 @@ def propose_from_detections(
     *,
     only_email_id: int | None = None,
     only_attachment_id: int | None = None,
+    only_case_id: int | None = None,
     min_score: float | None = None,
 ) -> ProposeStats:
     """Auto-create ``status='proposed'`` redactions for every PII detection.
@@ -354,6 +355,9 @@ def propose_from_detections(
     Idempotent — the unique index on
     ``(source_type, source_id, start_offset, end_offset, exemption_code)``
     suppresses duplicates so re-running adds only the delta.
+
+    ``only_case_id`` covers both an email-text detection inside the case
+    and an attachment-text detection on one of the case's emails.
     """
     stats = ProposeStats()
 
@@ -366,6 +370,26 @@ def propose_from_detections(
     if only_attachment_id is not None:
         where.append("source_type = 'attachment_text' AND source_id = ?")
         params.append(only_attachment_id)
+    if only_case_id is not None:
+        # Email-body / email-subject detections live keyed on the email
+        # id; attachment-text detections live keyed on the attachment
+        # id, but the attachment row in turn knows its email_id. Both
+        # collapse to "is this detection on something that belongs to
+        # this case?" via the two subqueries below.
+        where.append(
+            "("
+            "(source_type LIKE 'email_%' "
+            " AND source_id IN (SELECT id FROM emails WHERE case_id = ?)) "
+            "OR "
+            "(source_type = 'attachment_text' "
+            " AND source_id IN ("
+            "    SELECT a.id FROM attachments a "
+            "    JOIN emails e ON e.id = a.email_id "
+            "    WHERE e.case_id = ?"
+            " ))"
+            ")"
+        )
+        params.extend([only_case_id, only_case_id])
     if min_score is not None:
         where.append("score >= ?")
         params.append(min_score)
