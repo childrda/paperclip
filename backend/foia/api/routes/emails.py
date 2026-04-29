@@ -6,9 +6,12 @@ import json
 import sqlite3
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
-from ..deps import Pagination, get_db, pagination
+from ... import audit
+from ...district import load_district_config
+from ...redaction import propose_from_detections
+from ..deps import CallerIdentity, Pagination, get_db, pagination, require_user
 from ..schemas import (
     AttachmentSummary,
     EmailDetail,
@@ -224,6 +227,42 @@ def get_email_redactions(
         (email_id,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+@router.post(
+    "/{email_id}/propose-redactions",
+    summary=(
+        "Run the auto-proposer over this email's PII detections. "
+        "Recovery path for emails imported with proposing skipped."
+    ),
+)
+def propose_email_redactions(
+    email_id: int,
+    request: Request,
+    conn: sqlite3.Connection = Depends(get_db),
+    caller: CallerIdentity = Depends(require_user),
+):
+    if conn.execute(
+        "SELECT 1 FROM emails WHERE id = ?", (email_id,)
+    ).fetchone() is None:
+        raise HTTPException(404, f"email {email_id} not found")
+
+    cached = getattr(request.app.state, "district_config", None)
+    if cached is None:
+        cached = load_district_config()
+        request.app.state.district_config = cached
+
+    stats = propose_from_detections(conn, cached, only_email_id=email_id)
+    conn.commit()
+    audit.log_event(
+        conn,
+        event_type="email.redactions_proposed",
+        actor=caller.actor, user_id=caller.user_id, origin="api",
+        source_type="email", source_id=email_id,
+        payload=stats.as_dict(),
+    )
+    conn.commit()
+    return stats.as_dict()
 
 
 @router.get(

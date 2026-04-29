@@ -105,6 +105,35 @@ export default function EmailDetailPage() {
     }
   }
 
+  const [proposing, setProposing] = useState(false);
+  async function runProposeForEmail() {
+    if (proposing) return;
+    setProposing(true);
+    try {
+      const stats = await api.proposeEmailRedactions(emailId);
+      const reds = await api.getEmailRedactions(emailId);
+      setRedactions(reds);
+      const lines = [
+        `${stats.proposed} new redaction(s) proposed.`,
+        stats.skipped_existing > 0
+          ? `${stats.skipped_existing} already existed.`
+          : "",
+        stats.skipped_no_exemption > 0
+          ? `${stats.skipped_no_exemption} skipped — no exemption code mapped for that entity type. Edit district.yaml to map them.`
+          : "",
+        stats.detections_seen === 0
+          ? "No PII detections were recorded for this email."
+          : "",
+      ].filter(Boolean);
+      alert(lines.join("\n"));
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      alert(`Propose failed: ${msg}`);
+    } finally {
+      setProposing(false);
+    }
+  }
+
   const [aiScanBusy, setAiScanBusy] = useState(false);
   async function runAiScan() {
     if (aiScanBusy) return;
@@ -140,6 +169,8 @@ export default function EmailDetailPage() {
     },
     { proposed: 0, accepted: 0, rejected: 0 } as Record<RedactionStatus, number>,
   );
+  const detectionCount = email.pii_detections.length;
+  const needsPropose = detectionCount > redactions.length;
 
   return (
     <>
@@ -152,7 +183,22 @@ export default function EmailDetailPage() {
         }}
       >
         <Link to="/emails">← Back to list</Link>
-        <span style={{ marginLeft: "auto" }}>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+          {needsPropose ? (
+            <button
+              onClick={runProposeForEmail}
+              disabled={proposing}
+              title={
+                `${detectionCount} PII span(s) detected, ` +
+                `${redactions.length} redaction(s) so far. ` +
+                `Click to propose the missing ones.`
+              }
+            >
+              {proposing
+                ? "Proposing…"
+                : `Propose ${detectionCount - redactions.length} redaction(s)`}
+            </button>
+          ) : null}
           <button onClick={runAiScan} disabled={aiScanBusy}>
             {aiScanBusy ? "Scanning…" : "Run AI scan on this email"}
           </button>

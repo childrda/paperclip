@@ -231,6 +231,39 @@ def test_emails_listing_filters_by_case_id(client):
     assert a["items"][0]["id"] != b["items"][0]["id"]
 
 
+def test_email_level_propose_endpoint(client):
+    """Per-email propose button: lets a reviewer recover one email without
+    affecting the rest of the case."""
+    _login(client)
+    r = client.post(
+        "/api/v1/imports",
+        files={"file": ("e.mbox", _build_mbox_bytes(), "application/octet-stream")},
+        data={
+            "name": "per-email",
+            "bates_prefix": "PE",
+            "propose_redactions": "false",
+        },
+    )
+    submit = r.json()
+    _wait_for_job(client, submit["job_id"])
+
+    emails = client.get(f"/api/v1/emails?case_id={submit['case_id']}").json()
+    assert emails["total"] == 1
+    eid = emails["items"][0]["id"]
+
+    # Initially, no redactions on this email.
+    assert client.get(f"/api/v1/emails/{eid}/redactions").json() == []
+
+    # Email-level propose creates them.
+    resp = client.post(f"/api/v1/emails/{eid}/propose-redactions")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["proposed"] >= 2
+
+    reds = client.get(f"/api/v1/emails/{eid}/redactions").json()
+    assert len(reds) >= 2
+    assert all(r["status"] == "proposed" for r in reds)
+
+
 def test_propose_redactions_endpoint_recovers_a_case_with_zero_redactions(client):
     """An import made with propose_redactions=false leaves PII detections
     but no redactions. The case-level propose endpoint must close that

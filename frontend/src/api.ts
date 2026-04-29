@@ -91,6 +91,19 @@ export const api = {
     return request(`/api/v1/emails/${id}/redactions`);
   },
 
+  async proposeEmailRedactions(id: number): Promise<{
+    detections_seen: number;
+    proposed: number;
+    skipped_existing: number;
+    skipped_no_exemption: number;
+    skipped_invalid: number;
+    by_entity: Record<string, number>;
+  }> {
+    return request(`/api/v1/emails/${id}/propose-redactions`, {
+      method: "POST",
+    });
+  },
+
   async patchRedaction(
     id: number,
     payload: Partial<{
