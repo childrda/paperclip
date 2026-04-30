@@ -82,6 +82,35 @@ export default function EmailDetailPage() {
     }
   }
 
+  async function handleDelete(redactionId: number) {
+    try {
+      await api.deleteRedaction(redactionId);
+      setRedactions((rs) => rs.filter((r) => r.id !== redactionId));
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      alert(`Failed to delete redaction: ${msg}`);
+    }
+  }
+
+  function makeCreator(sourceType: string) {
+    return async (range: { start: number; end: number; exemption_code: string }) => {
+      try {
+        const created = await api.createRedaction({
+          source_type: sourceType,
+          source_id: emailId,
+          start_offset: range.start,
+          end_offset: range.end,
+          exemption_code: range.exemption_code,
+          status: "proposed",
+        });
+        setRedactions((rs) => [...rs, created]);
+      } catch (e) {
+        const msg = e instanceof ApiError ? e.message : String(e);
+        alert(`Failed to add redaction: ${msg}`);
+      }
+    };
+  }
+
   async function handleDismissFlag(flagId: number) {
     try {
       const updated = await api.dismissAiFlag(flagId);
@@ -242,6 +271,8 @@ export default function EmailDetailPage() {
           sourceId={email.id}
           exemptionCodes={exemptions}
           onPatch={handlePatch}
+          onDelete={handleDelete}
+          onCreate={makeCreator("email_subject")}
         />
       </div>
 
@@ -252,6 +283,11 @@ export default function EmailDetailPage() {
             ({counts.proposed} proposed · {counts.accepted} accepted · {counts.rejected} rejected)
           </small>
         </h2>
+        <p className="muted small" style={{ marginTop: 0 }}>
+          Click a highlight to accept / reject / delete it. Or
+          highlight any unmarked text and a <em>Redact selection</em>
+          tool will appear.
+        </p>
         <Legend />
         <HighlightedText
           text={email.body_text ?? ""}
@@ -260,6 +296,8 @@ export default function EmailDetailPage() {
           sourceId={email.id}
           exemptionCodes={exemptions}
           onPatch={handlePatch}
+          onDelete={handleDelete}
+          onCreate={makeCreator("email_body_text")}
         />
       </div>
 
@@ -273,6 +311,8 @@ export default function EmailDetailPage() {
             sourceId={email.id}
             exemptionCodes={exemptions}
             onPatch={handlePatch}
+            onDelete={handleDelete}
+            onCreate={makeCreator("email_body_html")}
           />
         </div>
       ) : null}

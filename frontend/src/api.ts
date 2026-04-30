@@ -119,6 +119,26 @@ export const api = {
     });
   },
 
+  async createRedaction(payload: {
+    source_type: string;
+    source_id: number;
+    start_offset: number;
+    end_offset: number;
+    exemption_code: string;
+    status?: RedactionStatus;
+    reviewer_id?: string;
+    notes?: string;
+  }): Promise<Redaction> {
+    return request(`/api/v1/redactions`, {
+      method: "POST",
+      body: JSON.stringify({ status: "proposed", ...payload }),
+    });
+  },
+
+  async deleteRedaction(id: number): Promise<void> {
+    await request(`/api/v1/redactions/${id}`, { method: "DELETE" });
+  },
+
   async listExemptionCodes(): Promise<ExemptionCode[]> {
     return request("/api/v1/exemption-codes");
   },

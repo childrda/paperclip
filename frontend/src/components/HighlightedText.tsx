@@ -22,6 +22,10 @@ interface Props {
       notes: string;
     }>,
   ) => Promise<void>;
+  /** Remove a redaction entirely (used when an auto-proposal was wrong). */
+  onDelete?: (redactionId: number) => Promise<void>;
+  /** Create a manual redaction over an arbitrary text range. */
+  onCreate?: (range: { start: number; end: number }) => Promise<void>;
 }
 
 interface Segment {
@@ -59,6 +63,40 @@ function buildSegments(text: string, redactions: Redaction[]): Segment[] {
   return segments;
 }
 
+/**
+ * Compute the offset of a (node, offsetInNode) pair within the
+ * concatenated text content of ``container``. Walks every text node
+ * inside the container in DOM order and counts characters until the
+ * target node is hit.
+ *
+ * Returns -1 if the target isn't a descendant of the container — in
+ * practice that means the user's selection straddled outside our
+ * highlighted block, and we should ignore it.
+ */
+function getTextOffset(
+  container: Node,
+  target: Node,
+  offsetInTarget: number,
+): number {
+  if (target === container) {
+    // Selection anchored on the container itself: count all text up to
+    // the Nth child.
+    let total = 0;
+    for (let i = 0; i < offsetInTarget && i < container.childNodes.length; i++) {
+      total += (container.childNodes[i].textContent ?? "").length;
+    }
+    return total;
+  }
+  let offset = 0;
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    if (node === target) return offset + offsetInTarget;
+    offset += (node as Text).data.length;
+  }
+  return -1;
+}
+
 export function HighlightedText({
   text,
   redactions,
@@ -66,6 +104,8 @@ export function HighlightedText({
   sourceId,
   exemptionCodes,
   onPatch,
+  onDelete,
+  onCreate,
 }: Props) {
   const filtered = redactions.filter(
     (r) => r.source_type === sourceType && r.source_id === sourceId,
@@ -74,19 +114,33 @@ export function HighlightedText({
 
   const [openId, setOpenId] = useState<number | null>(null);
   const [popoverPos, setPopoverPos] = useState<{ top: number; left: number } | null>(null);
+  const [pendingSelection, setPendingSelection] = useState<{
+    start: number;
+    end: number;
+    top: number;
+    left: number;
+  } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   // Click outside / Escape to dismiss the popover.
   useEffect(() => {
-    if (openId === null) return;
+    if (openId === null && pendingSelection === null) return;
     function handler(e: MouseEvent) {
       const target = e.target as HTMLElement | null;
-      if (!target?.closest(".span-actions") && !target?.closest(".span-marker")) {
+      if (
+        !target?.closest(".span-actions") &&
+        !target?.closest(".span-marker") &&
+        !target?.closest(".selection-toolbar")
+      ) {
         setOpenId(null);
+        setPendingSelection(null);
       }
     }
     function key(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpenId(null);
+      if (e.key === "Escape") {
+        setOpenId(null);
+        setPendingSelection(null);
+      }
     }
     document.addEventListener("mousedown", handler);
     document.addEventListener("keydown", key);
@@ -94,10 +148,42 @@ export function HighlightedText({
       document.removeEventListener("mousedown", handler);
       document.removeEventListener("keydown", key);
     };
-  }, [openId]);
+  }, [openId, pendingSelection]);
+
+  function handleMouseUp() {
+    if (!onCreate) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    const container = containerRef.current;
+    if (!container) return;
+    if (!container.contains(range.commonAncestorContainer)) return;
+    const a = getTextOffset(container, range.startContainer, range.startOffset);
+    const b = getTextOffset(container, range.endContainer, range.endOffset);
+    if (a < 0 || b < 0 || a === b) return;
+    const start = Math.min(a, b);
+    const end = Math.max(a, b);
+    const rect = range.getBoundingClientRect();
+    setPendingSelection({
+      start,
+      end,
+      // ``position: fixed`` on the toolbar — viewport coords, NO scroll
+      // offset.
+      top: rect.bottom + 4,
+      left: rect.left,
+    });
+    // Don't close the existing span popover if one is open; the user
+    // might have made a selection inside the popover input.
+  }
 
   return (
-    <div className="body-text" ref={containerRef}>
+    <div
+      className="body-text"
+      ref={containerRef}
+      onMouseUp={handleMouseUp}
+    >
       {segments.map((seg, i) => {
         const slice = text.slice(seg.start, seg.end);
         if (!seg.redaction) {
@@ -112,11 +198,13 @@ export function HighlightedText({
             onClick={(e) => {
               e.stopPropagation();
               const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+              // ``position: fixed`` — viewport coords, no scroll offset.
               setPopoverPos({
-                top: rect.bottom + window.scrollY + 4,
-                left: rect.left + window.scrollX,
+                top: rect.bottom + 4,
+                left: rect.left,
               });
               setOpenId(r.id);
+              setPendingSelection(null);
             }}
           >
             {slice || "·"}
@@ -133,7 +221,31 @@ export function HighlightedText({
             await onPatch(openId, payload);
             setOpenId(null);
           }}
+          onDelete={
+            onDelete
+              ? async () => {
+                  await onDelete(openId);
+                  setOpenId(null);
+                }
+              : undefined
+          }
           onCancel={() => setOpenId(null)}
+        />
+      ) : null}
+
+      {pendingSelection && onCreate ? (
+        <SelectionToolbar
+          start={pendingSelection.start}
+          end={pendingSelection.end}
+          position={{ top: pendingSelection.top, left: pendingSelection.left }}
+          exemptionCodes={exemptionCodes}
+          previewText={text.slice(pendingSelection.start, pendingSelection.end)}
+          onCreate={async (payload) => {
+            await onCreate(payload);
+            setPendingSelection(null);
+            window.getSelection()?.removeAllRanges();
+          }}
+          onCancel={() => setPendingSelection(null)}
         />
       ) : null}
     </div>
@@ -152,6 +264,7 @@ interface ActionsProps {
       notes: string;
     }>,
   ) => Promise<void>;
+  onDelete?: () => Promise<void>;
   onCancel: () => void;
 }
 
@@ -160,6 +273,7 @@ function SpanActions({
   exemptionCodes,
   position,
   onPatch,
+  onDelete,
   onCancel,
 }: ActionsProps) {
   const [exemption, setExemption] = useState(redaction.exemption_code);
@@ -206,6 +320,21 @@ function SpanActions({
     setBusy(true);
     try {
       await onPatch({ exemption_code: exemption });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!onDelete) return;
+    if (!confirm(
+      `Delete redaction #${redaction.id} entirely? This is irreversible.`,
+    )) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await onDelete();
     } finally {
       setBusy(false);
     }
@@ -269,8 +398,102 @@ function SpanActions({
         >
           Reject
         </button>
+        {onDelete ? (
+          <button
+            disabled={busy}
+            onClick={handleDelete}
+            title="Remove this redaction entirely (e.g. an auto-proposal that's wrong)"
+          >
+            Delete
+          </button>
+        ) : null}
         <button onClick={onCancel} disabled={busy}>
           Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface SelectionToolbarProps {
+  start: number;
+  end: number;
+  position: { top: number; left: number };
+  exemptionCodes: ExemptionCode[];
+  previewText: string;
+  onCreate: (payload: {
+    start: number;
+    end: number;
+    exemption_code: string;
+  }) => Promise<void>;
+  onCancel: () => void;
+}
+
+function SelectionToolbar({
+  start,
+  end,
+  position,
+  exemptionCodes,
+  previewText,
+  onCreate,
+  onCancel,
+}: SelectionToolbarProps) {
+  const [exemption, setExemption] = useState(
+    exemptionCodes[0]?.code ?? "FERPA",
+  );
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setBusy(true);
+    try {
+      await onCreate({ start, end, exemption_code: exemption });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const preview =
+    previewText.length > 60
+      ? previewText.slice(0, 57) + "…"
+      : previewText;
+
+  return (
+    <div
+      className="span-actions selection-toolbar"
+      style={{ top: position.top, left: position.left }}
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <h4>Redact selection</h4>
+      <p className="muted small">
+        <code>{preview || "(empty)"}</code> ({end - start} chars)
+      </p>
+      <p>
+        <label>
+          Exemption:{" "}
+          <select
+            value={exemption}
+            onChange={(e) => setExemption(e.target.value)}
+            disabled={busy}
+          >
+            {exemptionCodes.map((c) => (
+              <option key={c.code} value={c.code}>
+                {c.code}
+              </option>
+            ))}
+          </select>
+        </label>
+      </p>
+      <div className="row">
+        <button
+          className="accept"
+          disabled={busy || end - start <= 0}
+          onClick={submit}
+        >
+          {busy ? "Adding…" : "Add as proposed"}
+        </button>
+        <button onClick={onCancel} disabled={busy}>
+          Cancel
         </button>
       </div>
     </div>
