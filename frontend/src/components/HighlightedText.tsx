@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ExemptionCode, Redaction, RedactionStatus } from "../types";
 
 interface Props {
@@ -212,42 +213,54 @@ export function HighlightedText({
         );
       })}
 
-      {openId !== null && popoverPos ? (
-        <SpanActions
-          redaction={filtered.find((r) => r.id === openId)!}
-          exemptionCodes={exemptionCodes}
-          position={popoverPos}
-          onPatch={async (payload) => {
-            await onPatch(openId, payload);
-            setOpenId(null);
-          }}
-          onDelete={
-            onDelete
-              ? async () => {
-                  await onDelete(openId);
-                  setOpenId(null);
-                }
-              : undefined
-          }
-          onCancel={() => setOpenId(null)}
-        />
-      ) : null}
+      {openId !== null && popoverPos
+        ? createPortal(
+            <SpanActions
+              redaction={filtered.find((r) => r.id === openId)!}
+              exemptionCodes={exemptionCodes}
+              position={popoverPos}
+              onPatch={async (payload) => {
+                await onPatch(openId, payload);
+                setOpenId(null);
+              }}
+              onDelete={
+                onDelete
+                  ? async () => {
+                      await onDelete(openId);
+                      setOpenId(null);
+                    }
+                  : undefined
+              }
+              onCancel={() => setOpenId(null)}
+            />,
+            document.body,
+          )
+        : null}
 
-      {pendingSelection && onCreate ? (
-        <SelectionToolbar
-          start={pendingSelection.start}
-          end={pendingSelection.end}
-          position={{ top: pendingSelection.top, left: pendingSelection.left }}
-          exemptionCodes={exemptionCodes}
-          previewText={text.slice(pendingSelection.start, pendingSelection.end)}
-          onCreate={async (payload) => {
-            await onCreate(payload);
-            setPendingSelection(null);
-            window.getSelection()?.removeAllRanges();
-          }}
-          onCancel={() => setPendingSelection(null)}
-        />
-      ) : null}
+      {pendingSelection && onCreate
+        ? createPortal(
+            <SelectionToolbar
+              start={pendingSelection.start}
+              end={pendingSelection.end}
+              position={{
+                top: pendingSelection.top,
+                left: pendingSelection.left,
+              }}
+              exemptionCodes={exemptionCodes}
+              previewText={text.slice(
+                pendingSelection.start,
+                pendingSelection.end,
+              )}
+              onCreate={async (payload) => {
+                await onCreate(payload);
+                setPendingSelection(null);
+                window.getSelection()?.removeAllRanges();
+              }}
+              onCancel={() => setPendingSelection(null)}
+            />,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

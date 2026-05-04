@@ -11,6 +11,12 @@ import ExportsPage from "./pages/ExportsPage";
 import AuditPage from "./pages/AuditPage";
 import { AuthProvider, RequireAuth, useAuth } from "./auth";
 
+// Bump on every UI commit so operators can confirm via the page
+// footer that their docker rebuild and browser cache actually
+// picked up the new bundle. If you see an older tag than the one
+// in `git log`, you're on stale code.
+const UI_BUILD_TAG = "ui-2026-05-04-redaction-portal";
+
 const NAV = [
   { to: "/cases", label: "Cases" },
   { to: "/emails", label: "Emails" },
@@ -149,6 +155,17 @@ function Shell() {
           />
         </Routes>
       </main>
+      <footer
+        style={{
+          marginTop: 24,
+          padding: "8px 16px",
+          fontSize: 11,
+          color: "#888",
+          textAlign: "right",
+        }}
+      >
+        {UI_BUILD_TAG}
+      </footer>
     </>
   );
 }
