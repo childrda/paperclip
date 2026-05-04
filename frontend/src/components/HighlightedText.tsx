@@ -26,7 +26,11 @@ interface Props {
   /** Remove a redaction entirely (used when an auto-proposal was wrong). */
   onDelete?: (redactionId: number) => Promise<void>;
   /** Create a manual redaction over an arbitrary text range. */
-  onCreate?: (range: { start: number; end: number }) => Promise<void>;
+  onCreate?: (range: {
+    start: number;
+    end: number;
+    exemption_code: string;
+  }) => Promise<void>;
 }
 
 interface Segment {
