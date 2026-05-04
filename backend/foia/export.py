@@ -255,8 +255,36 @@ def _attachment_sources(
 # ---------------------------------------------------------------------------
 
 
+def _sanitize_for_pdf(text: str) -> str:
+    """Replace characters Helvetica can't draw with spaces, one-for-one.
+
+    Tabs and other control bytes render as solid ``■`` boxes through
+    reportlab's default font (their glyph slots are missing). The
+    common case is patch diffs and quoted code where ``\\t`` indents
+    appear as walls of squares in the production PDF.
+
+    We keep the substitution character-for-character so existing
+    redaction offsets continue to align — tabs become single spaces,
+    not expanded indents.
+    """
+    out_chars: list[str] = []
+    for ch in text:
+        if ch == "\n":
+            out_chars.append(ch)
+            continue
+        code = ord(ch)
+        # ASCII control range (incl. tab, vertical tab, form feed,
+        # carriage return) plus DEL.
+        if code < 0x20 or code == 0x7F:
+            out_chars.append(" ")
+            continue
+        out_chars.append(ch)
+    return "".join(out_chars)
+
+
 def _wrap_lines(text: str, width_chars: int) -> list[tuple[int, str]]:
     """Hard-wrap to ``width_chars`` per line. Returns (offset, line) pairs."""
+    text = _sanitize_for_pdf(text)
     out: list[tuple[int, str]] = []
     cursor = 0
     for raw_line in text.split("\n"):

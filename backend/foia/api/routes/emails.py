@@ -210,6 +210,7 @@ def get_email(
             )
             for d in pii
         ],
+        case_id=row["case_id"],
         excluded_at=row["excluded_at"],
         excluded_by_user_id=row["excluded_by_user_id"],
         exclusion_reason=row["exclusion_reason"],

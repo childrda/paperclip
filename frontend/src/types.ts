@@ -61,6 +61,7 @@ export interface EmailDetail {
   ingested_at: string;
   attachments: AttachmentSummary[];
   pii_detections: PiiDetection[];
+  case_id: number | null;
   excluded_at: string | null;
   excluded_by_user_id: number | null;
   exclusion_reason: string | null;

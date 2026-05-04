@@ -143,6 +143,23 @@ def test_wrap_lines_empty_text():
     assert _wrap_lines("", 80) == [(0, "")]
 
 
+def test_wrap_lines_replaces_tabs_with_spaces_preserving_offsets():
+    """Tabs in source text used to render as ``■`` in the production PDF
+    (Helvetica has no glyph for them). They're now replaced one-for-one
+    with spaces so existing redaction offsets continue to align."""
+    text = "+\tif (foo) {\n+\t\tbar();"
+    lines = _wrap_lines(text, width_chars=80)
+    # No tab in any rendered line.
+    for _, line in lines:
+        assert "\t" not in line
+    # The first line still has the same length the original had — tab
+    # got replaced character-for-character, not expanded.
+    first_offset, first_line = lines[0]
+    assert first_offset == 0
+    assert len(first_line) == len("+\tif (foo) {")
+    assert first_line.startswith("+ if (foo) {")
+
+
 def test_line_intersections_disjoint():
     from foia.export import _Redaction
     r1 = _Redaction(1, "email_body_text", 1, 2, 5, "FERPA", None, "")

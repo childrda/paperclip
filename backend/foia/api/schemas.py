@@ -63,6 +63,7 @@ class EmailDetail(BaseModel):
     ingested_at: str
     attachments: list[AttachmentSummary]
     pii_detections: list["PiiDetectionOut"]
+    case_id: int | None = None
     excluded_at: str | None = None
     excluded_by_user_id: int | None = None
     exclusion_reason: str | None = None
