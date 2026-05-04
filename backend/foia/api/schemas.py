@@ -29,6 +29,7 @@ class EmailSummary(BaseModel):
     mbox_index: int
     has_attachments: bool
     pii_count: int
+    is_excluded: bool = False
 
 
 class AttachmentSummary(BaseModel):
@@ -62,6 +63,9 @@ class EmailDetail(BaseModel):
     ingested_at: str
     attachments: list[AttachmentSummary]
     pii_detections: list["PiiDetectionOut"]
+    excluded_at: str | None = None
+    excluded_by_user_id: int | None = None
+    exclusion_reason: str | None = None
 
 
 class AttachmentDetail(BaseModel):

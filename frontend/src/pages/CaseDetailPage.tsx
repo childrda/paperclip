@@ -115,7 +115,14 @@ export default function CaseDetailPage() {
       ) : null}
 
       <div className="stat-row">
-        <Stat label="Emails" value={data.stats.emails} />
+        <Stat
+          label="Emails"
+          value={
+            data.stats.emails_excluded > 0
+              ? `${data.stats.emails} (+${data.stats.emails_excluded} excluded)`
+              : data.stats.emails
+          }
+        />
         <Stat label="Attachments" value={data.stats.attachments} />
         <Stat label="PII spans" value={data.stats.pii_detections} />
         <Stat

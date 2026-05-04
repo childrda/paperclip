@@ -172,9 +172,11 @@ def _email_sources(
         "FROM emails"
     )
     params: list = []
+    where: list[str] = ["excluded_at IS NULL"]
     if only_email_ids is not None:
-        sql += f" WHERE id IN ({','.join('?' * len(only_email_ids))})"
+        where.append(f"id IN ({','.join('?' * len(only_email_ids))})")
         params.extend(only_email_ids)
+    sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY (date_sent IS NULL), date_sent, id"
 
     import json as _json
@@ -218,7 +220,10 @@ def _attachment_sources(
         "       t.extracted_text "
         "FROM attachments a "
         "JOIN attachments_text t ON t.attachment_id = a.id "
-        "WHERE t.extraction_status = 'ok' AND t.extracted_text IS NOT NULL"
+        "JOIN emails e ON e.id = a.email_id "
+        "WHERE t.extraction_status = 'ok' "
+        "  AND t.extracted_text IS NOT NULL "
+        "  AND e.excluded_at IS NULL"
     )
     params: list = []
     if only_email_ids is not None:

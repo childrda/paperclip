@@ -21,10 +21,18 @@ CREATE TABLE IF NOT EXISTS emails (
     headers_json        TEXT,     -- full headers as JSON object (key -> list[str])
     ingested_at         TEXT NOT NULL,
     case_id             INTEGER,  -- FK added by db.py migration; NULL = legacy
+    -- Exclusion: a reviewer can withhold a whole email (privilege /
+    -- non-responsive / duplicate). The row stays in the DB so the
+    -- audit trail and the redaction history survive, but the export
+    -- pipeline skips it and the UI marks it as excluded.
+    excluded_at         TEXT,
+    excluded_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    exclusion_reason    TEXT,
     UNIQUE (mbox_source, mbox_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_emails_case ON emails(case_id);
+CREATE INDEX IF NOT EXISTS idx_emails_excluded ON emails(excluded_at);
 
 CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id);
 CREATE INDEX IF NOT EXISTS idx_emails_from       ON emails(from_addr);

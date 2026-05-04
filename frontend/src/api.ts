@@ -104,6 +104,17 @@ export const api = {
     });
   },
 
+  async excludeEmail(id: number, reason?: string): Promise<EmailDetail> {
+    return request(`/api/v1/emails/${id}/exclude`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason ?? null }),
+    });
+  },
+
+  async includeEmail(id: number): Promise<EmailDetail> {
+    return request(`/api/v1/emails/${id}/include`, { method: "POST" });
+  },
+
   async patchRedaction(
     id: number,
     payload: Partial<{

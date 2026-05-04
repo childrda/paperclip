@@ -46,6 +46,8 @@ EVT_REDACTION_PROPOSE = "redaction.propose"
 EVT_REDACTION_CREATE = "redaction.create"
 EVT_REDACTION_UPDATE = "redaction.update"
 EVT_REDACTION_DELETE = "redaction.delete"
+EVT_EMAIL_EXCLUDED = "email.excluded"
+EVT_EMAIL_INCLUDED = "email.included"
 EVT_EXPORT_RUN = "export.run"
 
 

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import BaseModel, ConfigDict
 
 from ... import audit
 from ...district import load_district_config
@@ -19,6 +21,11 @@ from ..schemas import (
     Page,
     PiiDetectionOut,
 )
+
+
+class ExcludePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str | None = None
 
 router = APIRouter(prefix="/emails", tags=["emails"])
 
@@ -33,6 +40,7 @@ def _row_to_summary(row: sqlite3.Row) -> EmailSummary:
         mbox_index=row["mbox_index"],
         has_attachments=bool(row["has_attachments"]),
         pii_count=int(row["pii_count"] or 0),
+        is_excluded=bool(row["is_excluded"]),
     )
 
 
@@ -119,7 +127,8 @@ def list_emails(
             emails.mbox_source, emails.mbox_index,
             EXISTS(SELECT 1 FROM attachments a WHERE a.email_id = emails.id) AS has_attachments,
             (SELECT COUNT(*) FROM pii_detections p
-              WHERE p.source_type LIKE 'email_%' AND p.source_id = emails.id) AS pii_count
+              WHERE p.source_type LIKE 'email_%' AND p.source_id = emails.id) AS pii_count,
+            (emails.excluded_at IS NOT NULL) AS is_excluded
         FROM emails
         {clause}
         ORDER BY (emails.date_sent IS NULL), emails.date_sent DESC, emails.id DESC
@@ -201,6 +210,9 @@ def get_email(
             )
             for d in pii
         ],
+        excluded_at=row["excluded_at"],
+        excluded_by_user_id=row["excluded_by_user_id"],
+        exclusion_reason=row["exclusion_reason"],
     )
 
 
@@ -227,6 +239,81 @@ def get_email_redactions(
         (email_id,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+@router.post(
+    "/{email_id}/exclude",
+    response_model=EmailDetail,
+    summary=(
+        "Withhold this email from the production. The row stays in the "
+        "database (audit trail), but the export pipeline skips it."
+    ),
+)
+def exclude_email(
+    email_id: int,
+    payload: ExcludePayload,
+    conn: sqlite3.Connection = Depends(get_db),
+    caller: CallerIdentity = Depends(require_user),
+):
+    if conn.execute(
+        "SELECT 1 FROM emails WHERE id = ?", (email_id,)
+    ).fetchone() is None:
+        raise HTTPException(404, f"email {email_id} not found")
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE emails SET excluded_at = ?, excluded_by_user_id = ?, "
+        "       exclusion_reason = ? WHERE id = ?",
+        (now, caller.user_id, payload.reason, email_id),
+    )
+    audit.log_event(
+        conn,
+        event_type=audit.EVT_EMAIL_EXCLUDED,
+        actor=caller.actor, user_id=caller.user_id, origin="api",
+        source_type="email", source_id=email_id,
+        payload={"reason": payload.reason, "excluded_at": now},
+    )
+    conn.commit()
+    return get_email(email_id, conn)
+
+
+@router.post(
+    "/{email_id}/include",
+    response_model=EmailDetail,
+    summary=(
+        "Reverse a prior exclusion — bring this email back into the "
+        "production."
+    ),
+)
+def include_email(
+    email_id: int,
+    conn: sqlite3.Connection = Depends(get_db),
+    caller: CallerIdentity = Depends(require_user),
+):
+    row = conn.execute(
+        "SELECT excluded_at FROM emails WHERE id = ?", (email_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, f"email {email_id} not found")
+    if row["excluded_at"] is None:
+        # Idempotent — re-including a non-excluded email is a no-op
+        # rather than an error.
+        return get_email(email_id, conn)
+
+    conn.execute(
+        "UPDATE emails SET excluded_at = NULL, excluded_by_user_id = NULL, "
+        "       exclusion_reason = NULL WHERE id = ?",
+        (email_id,),
+    )
+    audit.log_event(
+        conn,
+        event_type=audit.EVT_EMAIL_INCLUDED,
+        actor=caller.actor, user_id=caller.user_id, origin="api",
+        source_type="email", source_id=email_id,
+        payload={},
+    )
+    conn.commit()
+    return get_email(email_id, conn)
 
 
 @router.post(

@@ -60,6 +60,16 @@ def _migrate_legacy_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)"
         )
+    if "excluded_at" not in _column_names(conn, "emails"):
+        conn.execute("ALTER TABLE emails ADD COLUMN excluded_at TEXT")
+        conn.execute(
+            "ALTER TABLE emails ADD COLUMN excluded_by_user_id INTEGER"
+        )
+        conn.execute("ALTER TABLE emails ADD COLUMN exclusion_reason TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_emails_excluded "
+            "ON emails(excluded_at)"
+        )
 
 
 def _backfill_fts(conn: sqlite3.Connection) -> None:

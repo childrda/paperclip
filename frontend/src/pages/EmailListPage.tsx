@@ -165,13 +165,33 @@ export default function EmailListPage() {
             </tr>
           ) : (
             page?.items.map((row) => (
-              <tr key={row.id}>
+              <tr
+                key={row.id}
+                style={
+                  row.is_excluded
+                    ? {
+                        textDecoration: "line-through",
+                        color: "#999",
+                        background: "#fafafa",
+                      }
+                    : undefined
+                }
+              >
                 <td>{row.id}</td>
                 <td>{row.date_sent ?? <span className="muted">—</span>}</td>
                 <td>
                   <Link to={`/emails/${row.id}`}>
                     {row.subject ?? <span className="muted">(no subject)</span>}
                   </Link>
+                  {row.is_excluded ? (
+                    <span
+                      className="badge rejected"
+                      style={{ marginLeft: 8, fontSize: 10 }}
+                      title="Withheld from production"
+                    >
+                      excluded
+                    </span>
+                  ) : null}
                 </td>
                 <td>{row.from_addr ?? <span className="muted">—</span>}</td>
                 <td>{row.pii_count > 0 ? row.pii_count : ""}</td>

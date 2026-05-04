@@ -16,6 +16,7 @@ export interface EmailSummary {
   mbox_index: number;
   has_attachments: boolean;
   pii_count: number;
+  is_excluded: boolean;
 }
 
 export interface AttachmentSummary {
@@ -60,6 +61,9 @@ export interface EmailDetail {
   ingested_at: string;
   attachments: AttachmentSummary[];
   pii_detections: PiiDetection[];
+  excluded_at: string | null;
+  excluded_by_user_id: number | null;
+  exclusion_reason: string | null;
 }
 
 export type RedactionStatus = "proposed" | "accepted" | "rejected";
@@ -140,6 +144,7 @@ export interface Case {
 
 export interface CaseStats {
   emails: number;
+  emails_excluded: number;
   attachments: number;
   pii_detections: number;
   redactions: number;

@@ -15,7 +15,7 @@ import { AuthProvider, RequireAuth, useAuth } from "./auth";
 // footer that their docker rebuild and browser cache actually
 // picked up the new bundle. If you see an older tag than the one
 // in `git log`, you're on stale code.
-const UI_BUILD_TAG = "ui-2026-05-04-html-collapse";
+const UI_BUILD_TAG = "ui-2026-05-04-exclude-email";
 
 const NAV = [
   { to: "/cases", label: "Cases" },

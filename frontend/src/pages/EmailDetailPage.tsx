@@ -135,6 +135,45 @@ export default function EmailDetailPage() {
   }
 
   const [proposing, setProposing] = useState(false);
+  const [excluding, setExcluding] = useState(false);
+
+  async function handleExclude() {
+    if (!email || excluding) return;
+    const reason = prompt(
+      "Reason for withholding this email from the production " +
+        "(e.g. 'attorney-client privileged', 'non-responsive', " +
+        "'duplicate of email #3'). Optional but recommended for the " +
+        "audit trail.",
+      "",
+    );
+    // ``null`` here means the user clicked Cancel.
+    if (reason === null) return;
+    setExcluding(true);
+    try {
+      const updated = await api.excludeEmail(emailId, reason || undefined);
+      setEmail(updated);
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      alert(`Exclude failed: ${msg}`);
+    } finally {
+      setExcluding(false);
+    }
+  }
+
+  async function handleInclude() {
+    if (!email || excluding) return;
+    setExcluding(true);
+    try {
+      const updated = await api.includeEmail(emailId);
+      setEmail(updated);
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      alert(`Include failed: ${msg}`);
+    } finally {
+      setExcluding(false);
+    }
+  }
+
   async function runProposeForEmail() {
     if (proposing) return;
     setProposing(true);
@@ -213,6 +252,31 @@ export default function EmailDetailPage() {
       >
         <Link to="/emails">← Back to list</Link>
         <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+          {email.excluded_at ? (
+            <button
+              onClick={handleInclude}
+              disabled={excluding}
+              title="Bring this email back into the production."
+            >
+              {excluding ? "Working…" : "Include in production"}
+            </button>
+          ) : (
+            <button
+              onClick={handleExclude}
+              disabled={excluding}
+              title={
+                "Withhold this entire email from the export PDF / CSV. " +
+                "The email stays in the database for the audit trail."
+              }
+              style={{
+                background: "#c82828",
+                color: "#fff",
+                borderColor: "#8a1c1c",
+              }}
+            >
+              {excluding ? "Working…" : "Exclude this email"}
+            </button>
+          )}
           {needsPropose ? (
             <button
               onClick={runProposeForEmail}
@@ -233,6 +297,27 @@ export default function EmailDetailPage() {
           </button>
         </span>
       </div>
+
+      {email.excluded_at ? (
+        <div
+          className="error"
+          style={{
+            background: "#fff5e0",
+            color: "#8a4a00",
+            border: "1px solid #f0c060",
+            marginBottom: 12,
+          }}
+        >
+          <strong>Excluded from production</strong> — this email will
+          not appear in the exported PDF / CSV.{" "}
+          {email.exclusion_reason ? (
+            <>
+              Reason: <em>{email.exclusion_reason}</em>.{" "}
+            </>
+          ) : null}
+          Click <em>Include in production</em> above to reverse.
+        </div>
+      ) : null}
 
       <div className="detail-section">
         <h2>Headers</h2>

@@ -147,14 +147,27 @@ def update_case_status(
 
 
 def case_stats(conn: sqlite3.Connection, case_id: int) -> dict[str, int]:
-    """Counts to render on the case detail page."""
+    """Counts to render on the case detail page.
+
+    ``emails`` is the count that will land in the export (excluded
+    rows are filtered out). ``emails_excluded`` is exposed separately
+    so the UI can show "7 of 9 will export" when reviewers withhold
+    individual messages.
+    """
     emails = int(conn.execute(
-        "SELECT COUNT(*) FROM emails WHERE case_id = ?", (case_id,)
+        "SELECT COUNT(*) FROM emails "
+        "WHERE case_id = ? AND excluded_at IS NULL",
+        (case_id,),
+    ).fetchone()[0])
+    excluded = int(conn.execute(
+        "SELECT COUNT(*) FROM emails "
+        "WHERE case_id = ? AND excluded_at IS NOT NULL",
+        (case_id,),
     ).fetchone()[0])
     attachments = int(conn.execute(
         "SELECT COUNT(*) FROM attachments a "
         "JOIN emails e ON e.id = a.email_id "
-        "WHERE e.case_id = ?",
+        "WHERE e.case_id = ? AND e.excluded_at IS NULL",
         (case_id,),
     ).fetchone()[0])
     pii = int(conn.execute(
@@ -183,6 +196,7 @@ def case_stats(conn: sqlite3.Connection, case_id: int) -> dict[str, int]:
     ).fetchone()[0])
     return {
         "emails": emails,
+        "emails_excluded": excluded,
         "attachments": attachments,
         "pii_detections": pii,
         "redactions": redactions,

@@ -231,6 +231,68 @@ def test_emails_listing_filters_by_case_id(client):
     assert a["items"][0]["id"] != b["items"][0]["id"]
 
 
+def test_excluded_email_disappears_from_export_and_case_stats(client):
+    """Exclusion is the FOIA "withhold record" workflow.
+
+    Two emails in the same case: exclude one, verify case stats split
+    properly, the email-list filter still surfaces it (struck-through),
+    and the export pipeline omits it from the PDF source set.
+    """
+    _login(client)
+    r = client.post(
+        "/api/v1/imports",
+        files={"file": ("ex.mbox", _build_mbox_bytes(), "application/octet-stream")},
+        data={"name": "exclude-me", "bates_prefix": "EX"},
+    )
+    submit = r.json()
+    _wait_for_job(client, submit["job_id"])
+
+    case_id = submit["case_id"]
+    listing = client.get(f"/api/v1/emails?case_id={case_id}").json()
+    assert listing["total"] == 1
+    eid = listing["items"][0]["id"]
+    assert listing["items"][0]["is_excluded"] is False
+
+    # Exclude.
+    resp = client.post(
+        f"/api/v1/emails/{eid}/exclude",
+        json={"reason": "non-responsive — outside FOIA scope"},
+    )
+    assert resp.status_code == 200, resp.text
+    detail = resp.json()
+    assert detail["excluded_at"] is not None
+    assert detail["exclusion_reason"] == "non-responsive — outside FOIA scope"
+
+    # Case stats: emails count drops to 0; emails_excluded becomes 1.
+    case = client.get(f"/api/v1/cases/{case_id}").json()
+    assert case["stats"]["emails"] == 0
+    assert case["stats"]["emails_excluded"] == 1
+
+    # The email still appears in the list, struck-through.
+    listing2 = client.get(f"/api/v1/emails?case_id={case_id}").json()
+    assert listing2["total"] == 1
+    assert listing2["items"][0]["is_excluded"] is True
+
+    # Audit row recorded with the reason.
+    audit_resp = client.get("/api/v1/audit?event_type=email.excluded").json()
+    assert audit_resp["total"] == 1
+    assert audit_resp["items"][0]["payload"]["reason"] == (
+        "non-responsive — outside FOIA scope"
+    )
+
+    # Re-include.
+    resp2 = client.post(f"/api/v1/emails/{eid}/include")
+    assert resp2.status_code == 200
+    assert resp2.json()["excluded_at"] is None
+    case2 = client.get(f"/api/v1/cases/{case_id}").json()
+    assert case2["stats"]["emails"] == 1
+    assert case2["stats"]["emails_excluded"] == 0
+
+    # Re-including a non-excluded email is idempotent.
+    resp3 = client.post(f"/api/v1/emails/{eid}/include")
+    assert resp3.status_code == 200
+
+
 def test_email_level_propose_endpoint(client):
     """Per-email propose button: lets a reviewer recover one email without
     affecting the rest of the case."""
