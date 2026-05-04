@@ -301,21 +301,49 @@ export default function EmailDetailPage() {
         />
       </div>
 
-      {email.body_html_sanitized ? (
-        <div className="detail-section">
-          <h2>HTML body (sanitized text)</h2>
-          <HighlightedText
-            text={email.body_html_sanitized}
-            redactions={redactions}
-            sourceType="email_body_html"
-            sourceId={email.id}
-            exemptionCodes={exemptions}
-            onPatch={handlePatch}
-            onDelete={handleDelete}
-            onCreate={makeCreator("email_body_html")}
-          />
-        </div>
-      ) : null}
+      {email.body_html_sanitized ? (() => {
+        const htmlReds = redactions.filter(
+          (r) => r.source_type === "email_body_html",
+        );
+        // No redactions on the HTML representation? Then this whole
+        // block is just noise — the plain-text Body above covers the
+        // same content. Collapse aggressively when shown, and hide
+        // entirely when there's nothing tied to the HTML view.
+        if (htmlReds.length === 0) return null;
+        return (
+          <details className="detail-section">
+            <summary
+              style={{
+                fontSize: 14,
+                fontWeight: 600,
+                color: "#333",
+                cursor: "pointer",
+              }}
+            >
+              HTML body{" "}
+              <small className="muted" style={{ fontWeight: 400 }}>
+                ({htmlReds.length} redaction{htmlReds.length === 1 ? "" : "s"} on the
+                HTML view — usually inside <code>mailto:</code> links or
+                attributes that don't appear in the plain-text Body
+                above. Click to expand.)
+              </small>
+            </summary>
+            <div style={{ marginTop: 12 }}>
+              <Legend />
+              <HighlightedText
+                text={email.body_html_sanitized}
+                redactions={redactions}
+                sourceType="email_body_html"
+                sourceId={email.id}
+                exemptionCodes={exemptions}
+                onPatch={handlePatch}
+                onDelete={handleDelete}
+                onCreate={makeCreator("email_body_html")}
+              />
+            </div>
+          </details>
+        );
+      })() : null}
 
       {aiFlags.length > 0 ? (
         <div className="detail-section">
