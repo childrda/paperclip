@@ -11,11 +11,12 @@ import ExportsPage from "./pages/ExportsPage";
 import AuditPage from "./pages/AuditPage";
 import { AuthProvider, RequireAuth, useAuth } from "./auth";
 
-// Bump on every UI commit so operators can confirm via the page
-// footer that their docker rebuild and browser cache actually
-// picked up the new bundle. If you see an older tag than the one
-// in `git log`, you're on stale code.
-const UI_BUILD_TAG = "ui-2026-05-04-back-to-case";
+// Bump on every UI commit so operators can confirm via the header
+// pill that their docker rebuild and browser cache actually picked
+// up the new bundle. If you see an older tag than the one in
+// ``git log`` for this file, you're on stale code — hard-refresh
+// (Ctrl+Shift+R) or clear the browser's site cache.
+const UI_BUILD_TAG = "ui-2026-05-05-build-pill";
 
 const NAV = [
   { to: "/cases", label: "Cases" },
@@ -46,6 +47,24 @@ function Header() {
           </nav>
         ) : null}
       </div>
+      <span
+        title={
+          "Bundle version. If this doesn't match the latest tag in " +
+          "git log src/App.tsx, the browser is showing a cached old " +
+          "bundle — Ctrl+Shift+R."
+        }
+        style={{
+          fontSize: 10,
+          color: "#888",
+          background: "#f4f4f4",
+          padding: "2px 8px",
+          borderRadius: 10,
+          marginRight: 12,
+          fontFamily: "monospace",
+        }}
+      >
+        {UI_BUILD_TAG}
+      </span>
       {user ? (
         <div className="user-badge">
           <span className="user-name">{user.display_name ?? user.username}</span>
@@ -155,17 +174,6 @@ function Shell() {
           />
         </Routes>
       </main>
-      <footer
-        style={{
-          marginTop: 24,
-          padding: "8px 16px",
-          fontSize: 11,
-          color: "#888",
-          textAlign: "right",
-        }}
-      >
-        {UI_BUILD_TAG}
-      </footer>
     </>
   );
 }
