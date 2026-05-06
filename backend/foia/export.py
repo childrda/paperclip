@@ -37,10 +37,18 @@ log = logging.getLogger(__name__)
 
 
 # Ordered list of body sources we render per email (in document order).
+#
+# We deliberately omit ``email_body_html`` from the production PDF.
+# Reviewers found the raw markup rendering noisy and uninformative —
+# every email got two near-duplicate body sections, the second one
+# made of HTML tags. PII detection still runs against the HTML
+# alternative (so detections / redactions on attribute-only fields
+# like ``mailto:`` links remain in the audit trail), the export just
+# burns onto the plain-text representation. Re-add a tuple here if
+# operators ever want it back.
 EMAIL_SOURCES: tuple[tuple[str, str], ...] = (
     ("email_subject", "Subject"),
     ("email_body_text", "Body"),
-    ("email_body_html", "Body (HTML, sanitized)"),
 )
 
 

@@ -16,7 +16,7 @@ import { AuthProvider, RequireAuth, useAuth } from "./auth";
 // up the new bundle. If you see an older tag than the one in
 // ``git log`` for this file, you're on stale code — hard-refresh
 // (Ctrl+Shift+R) or clear the browser's site cache.
-const UI_BUILD_TAG = "ui-2026-05-05-build-pill";
+const UI_BUILD_TAG = "ui-2026-05-06-no-html-export";
 
 const NAV = [
   { to: "/cases", label: "Cases" },

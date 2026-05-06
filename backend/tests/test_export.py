@@ -123,8 +123,13 @@ def _pdf_pages(path: Path) -> int:
 
 
 def test_email_sources_constant_is_complete():
+    """Production PDF burns the subject and the plain-text body. The
+    HTML alternative is intentionally omitted — reviewers found the
+    raw markup rendering noisy and the plain-text view always covers
+    the same content for what the export needs."""
     types = {st for st, _ in EMAIL_SOURCES}
-    assert types == {"email_subject", "email_body_text", "email_body_html"}
+    assert types == {"email_subject", "email_body_text"}
+    assert "email_body_html" not in types
 
 
 def test_wrap_lines_preserves_offsets():
