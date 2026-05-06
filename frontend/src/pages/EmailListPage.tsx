@@ -59,6 +59,62 @@ export default function EmailListPage() {
   const totalPages = page ? Math.max(1, Math.ceil(page.total / PAGE_SIZE)) : 1;
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
 
+  const [busyId, setBusyId] = useState<number | null>(null);
+  async function handleInclude(id: number) {
+    if (busyId !== null) return;
+    setBusyId(id);
+    try {
+      await api.includeEmail(id);
+      // Refresh in place — the row's struck-through styling drops off
+      // and the case stats above will pick up the change on next load.
+      setPage((p) =>
+        p
+          ? {
+              ...p,
+              items: p.items.map((row) =>
+                row.id === id ? { ...row, is_excluded: false } : row,
+              ),
+            }
+          : p,
+      );
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      alert(`Include failed: ${msg}`);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleExclude(id: number) {
+    if (busyId !== null) return;
+    const reason = prompt(
+      "Reason for withholding this email from the production " +
+        "(e.g. 'attorney-client privileged', 'non-responsive', " +
+        "'duplicate'). Optional but recommended for the audit trail.",
+      "",
+    );
+    if (reason === null) return;
+    setBusyId(id);
+    try {
+      await api.excludeEmail(id, reason || undefined);
+      setPage((p) =>
+        p
+          ? {
+              ...p,
+              items: p.items.map((row) =>
+                row.id === id ? { ...row, is_excluded: true } : row,
+              ),
+            }
+          : p,
+      );
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      alert(`Exclude failed: ${msg}`);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   const [exporting, setExporting] = useState(false);
 
   async function runExport() {
@@ -148,18 +204,19 @@ export default function EmailListPage() {
             <th style={{ width: 240 }}>From</th>
             <th style={{ width: 90 }}>PII</th>
             <th style={{ width: 90 }}>Attach</th>
+            <th style={{ width: 110 }}>Actions</th>
           </tr>
         </thead>
         <tbody>
           {loading && !page ? (
             <tr>
-              <td colSpan={6} className="muted">
+              <td colSpan={7} className="muted">
                 Loading…
               </td>
             </tr>
           ) : page && page.items.length === 0 ? (
             <tr>
-              <td colSpan={6} className="muted">
+              <td colSpan={7} className="muted">
                 No emails match.
               </td>
             </tr>
@@ -196,6 +253,33 @@ export default function EmailListPage() {
                 <td>{row.from_addr ?? <span className="muted">—</span>}</td>
                 <td>{row.pii_count > 0 ? row.pii_count : ""}</td>
                 <td>{row.has_attachments ? "yes" : ""}</td>
+                <td style={{ textDecoration: "none" }}>
+                  {row.is_excluded ? (
+                    <button
+                      onClick={() => handleInclude(row.id)}
+                      disabled={busyId !== null}
+                      style={{ fontSize: 11, padding: "2px 8px" }}
+                      title="Bring this email back into the production."
+                    >
+                      {busyId === row.id ? "…" : "Include"}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => handleExclude(row.id)}
+                      disabled={busyId !== null}
+                      style={{
+                        fontSize: 11,
+                        padding: "2px 8px",
+                        background: "#fff",
+                        color: "#c82828",
+                        borderColor: "#c82828",
+                      }}
+                      title="Withhold this email from the production."
+                    >
+                      {busyId === row.id ? "…" : "Exclude"}
+                    </button>
+                  )}
+                </td>
               </tr>
             ))
           )}
